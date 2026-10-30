@@ -844,7 +844,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
             items: _cupOptions.map((item) {
               final String key = item['key'] as String;
-              final double presetWeight = item['weight'] as double;
               final String label = _t('cup_$key');
 
               return DropdownMenuItem<String>(
