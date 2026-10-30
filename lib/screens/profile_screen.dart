@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:image_picker/image_picker.dart';
@@ -29,22 +30,63 @@ class _ProfileScreenState extends State<ProfileScreen> {
   String _profileIcon = 'person';
   String _selectedLanguage = 'th';
 
+  // 🌟 ตัวแปรสำหรับตั้งค่าภาชนะ/ขวดน้ำ (ค่าเริ่มต้นคือ แก้ว SmartCup)
+  String _cupType = 'smartcup';
+  double _cupWeight = 200; // น้ำหนักแก้วมาตรฐาน SmartCup (กรัม)
+
+  // ค่าภาชนะที่บันทึกอยู่ใน Firebase ล่าสุด (ใช้เช็คว่ามีการเปลี่ยนที่ยังไม่ได้บันทึกไหม)
+  String _savedCupType = 'smartcup';
+  double _savedCupWeight = 200;
+  bool _savingCup = false;
+
+  double get _pendingCupWeight =>
+      double.tryParse(_cupWeightController.text) ?? _cupWeight;
+
+  bool get _isCupDirty =>
+      _cupType != _savedCupType || _pendingCupWeight != _savedCupWeight;
+
   double _dailyTarget = 2400;
 
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _ageController = TextEditingController();
   final TextEditingController _weightController = TextEditingController();
   final TextEditingController _heightController = TextEditingController();
+  final TextEditingController _cupWeightController = TextEditingController();
 
   StreamSubscription<DatabaseEvent>? _subscription;
 
+  // 🌟 รายการประเภทแก้ว/ขวดน้ำและน้ำหนักมาตรฐาน (กรัม)
+  final List<Map<String, dynamic>> _cupOptions = [
+    {'key': 'smartcup', 'weight': 200.0, 'icon': Icons.auto_awesome_rounded},
+    {
+      'key': 'plastic_bottle',
+      'weight': 20.0,
+      'icon': Icons.local_drink_rounded,
+    },
+    {'key': 'cafe_cup', 'weight': 30.0, 'icon': Icons.takeout_dining_rounded},
+    {'key': 'ceramic_mug', 'weight': 250.0, 'icon': Icons.coffee_rounded},
+    {'key': 'tumbler', 'weight': 350.0, 'icon': Icons.ac_unit_rounded},
+    {'key': 'custom', 'weight': 0.0, 'icon': Icons.scale_rounded},
+  ];
+
   // 🌟 พจนานุกรมแปลภาษาหน้าโปรไฟล์
-  final Map<String, Map<String, String>> _localizedTexts = {
+  // static const: ให้ Hot Reload เห็นข้อความที่เพิ่ม/แก้ใหม่ทันที
+  // (ถ้าเป็น field ปกติ Hot Reload จะไม่สร้าง Map ใหม่ ต้อง Hot Restart ถึงจะเห็น)
+  static const Map<String, Map<String, String>> _localizedTexts = {
     'th': {
-      'title': 'โปรไฟล์ของฉัน',
-      'subtitle': 'จัดการข้อมูลส่วนตัวและการตั้งค่า',
+      'title': 'โปรไฟล์และการตั้งค่า',
+      'subtitle': 'ตั้งค่าภาชนะและข้อมูลส่วนตัวก่อนเริ่มใช้งาน',
       'target': 'เป้าหมายการดื่มน้ำต่อวัน',
       'target_hint': 'แสดงเป้าหมายปัจจุบัน (จะอัปเดตเมื่อกดปุ่มบันทึกข้อมูล)',
+      'cup_section_title': 'เลือกแก้วหรือขวดน้ำที่ใช้',
+      'cup_section_subtitle': 'ระบบจะหักน้ำหนักภาชนะออกให้อัตโนมัติขณะชั่งน้ำ',
+      'cup_smartcup': 'แก้วประจำ SmartCup (แนะนำ)',
+      'cup_plastic_bottle': 'ขวดน้ำพลาสติกทั่วไป',
+      'cup_cafe_cup': 'แก้วพลาสติก / คาเฟ่',
+      'cup_ceramic_mug': 'แก้วเซรามิก / แก้วกระเบื้อง',
+      'cup_tumbler': 'แก้วเก็บความเย็น / สแตนเลส',
+      'cup_custom': 'ภาชนะอื่นๆ (ระบุน้ำหนักเอง)',
+      'cup_weight_label': 'น้ำหนักภาชนะเปล่า (กรัม)',
       'personal_info': 'ข้อมูลส่วนตัว',
       'gender': 'เพศ',
       'male': 'ชาย',
@@ -63,15 +105,30 @@ class _ProfileScreenState extends State<ProfileScreen> {
       'age': 'อายุ',
       'weight': 'น้ำหนัก',
       'height': 'ส่วนสูง',
-      'info_notice': 'ข้อมูลทั้งหมดรวมถึงภาษา รูปโปรไฟล์ และชื่อจะบันทึกเมื่อกดปุ่ม "บันทึกข้อมูล" ด้านล่าง',
+      'info_notice': 'ชื่อ รูปโปรไฟล์ และข้อมูลส่วนตัวจะบันทึกเมื่อกดปุ่ม "บันทึกข้อมูล" ด้านล่าง (ภาชนะบันทึกแยกในการ์ดด้านบน)',
       'save': 'บันทึกข้อมูล',
-      'saved_success': 'บันทึกข้อมูลเรียบร้อยแล้ว',
+      'saved_success': 'บันทึกข้อมูลโปรไฟล์เรียบร้อยแล้ว',
+      'save_cup': 'บันทึกภาชนะ',
+      'cup_saved_success':
+          'บันทึกภาชนะเรียบร้อยแล้ว เครื่องจะอัปเดตภายในไม่กี่วินาที',
+      'cup_save_failed': 'ไม่สามารถบันทึกภาชนะได้',
+      'cup_unsaved': 'ยังไม่ได้บันทึก',
     },
     'en': {
-      'title': 'My Profile',
-      'subtitle': 'Manage personal info and settings',
+      'title': 'Profile & Settings',
+      'subtitle': 'Set up your cup and personal info before starting',
       'target': 'Daily Water Intake Goal',
       'target_hint': 'Current goal (updates when you press save)',
+      'cup_section_title': 'Select Your Cup / Bottle',
+      'cup_section_subtitle':
+          'Container weight will be automatically deducted when weighing',
+      'cup_smartcup': 'Official SmartCup (Default)',
+      'cup_plastic_bottle': 'Plastic Water Bottle',
+      'cup_cafe_cup': 'Plastic / Cafe Cup',
+      'cup_ceramic_mug': 'Ceramic Mug',
+      'cup_tumbler': 'Insulated Tumbler / Flask',
+      'cup_custom': 'Other Container (Custom Weight)',
+      'cup_weight_label': 'Empty container weight (grams)',
       'personal_info': 'Personal Information',
       'gender': 'Gender',
       'male': 'Male',
@@ -90,14 +147,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
       'age': 'Age',
       'weight': 'Weight',
       'height': 'Height',
-      'info_notice': 'All info including language, picture, and name will update when you press "Save Profile" below.',
+      'info_notice': 'Name, picture, and personal info update when you press "Save Profile" below (the cup is saved separately in the card above).',
       'save': 'Save Profile',
       'saved_success': 'Profile saved successfully',
+      'save_cup': 'Save Cup',
+      'cup_saved_success': 'Cup saved. The device will update in a few seconds',
+      'cup_save_failed': 'Could not save cup settings',
+      'cup_unsaved': 'Not saved yet',
     },
   };
 
   String _t(String key) {
-    return _localizedTexts[_selectedLanguage]?[key] ?? key;
+    // หาในภาษาที่เลือกก่อน ไม่เจอค่อยใช้ภาษาไทย สุดท้ายค่อยแสดง key แบบไม่มี _
+    return _localizedTexts[_selectedLanguage]?[key] ??
+        _localizedTexts['th']?[key] ??
+        key.replaceAll('_', ' ');
   }
 
   @override
@@ -107,110 +171,110 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _ageController.text = '$_age';
     _weightController.text = '$_weight';
     _heightController.text = '$_height';
+    _cupWeightController.text = '${_cupWeight.toInt()}';
+    // รีเฟรชสถานะปุ่มบันทึกภาชนะขณะพิมพ์น้ำหนักเอง
+    _cupWeightController.addListener(() {
+      if (mounted) setState(() {});
+    });
 
     _dailyTarget = _calculateHybridTarget(
       _age,
       _gender,
       _weight,
+      _height,
       _statusType,
       _statusDetail,
     );
     _listenFirebase();
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // 🌟 ตารางอ้างอิง (เล่มโครงงาน ตาราง 2.1 และ 2.2 / DRI ไทย พ.ศ. 2563)
+  // แต่ละแถว: [อายุสูงสุดของกลุ่ม, น้ำต่ำสุด, น้ำสูงสุด, น้ำหนักเฉลี่ย(kg), ส่วนสูงเฉลี่ย(cm)]
+  // อายุเป็นจำนวนเต็ม (ปี): 0 = ทารก 6-11 เดือน (0-5 เดือนตารางให้ดื่มนมแม่ ไม่มีค่าน้ำ)
+  // ─────────────────────────────────────────────────────────────
+  static const List<List<double>> _maleWaterTable = [
+    [0, 800, 1200, 8.7, 71.2], //   6-11 เดือน
+    [3, 1000, 1500, 13.1, 90.8], // 1-3 ปี
+    [5, 1300, 1950, 18.3, 109.5], // 4-5 ปี
+    [8, 1400, 2100, 23.0, 122.3], // 6-8 ปี
+    [12, 1700, 2550, 35.6, 142.2], // 9-12 ปี
+    [15, 2500, 2550, 51.5, 164.3], // 13-15 ปี
+    [18, 2250, 3375, 58.3, 171.2], // 16-18 ปี
+    [30, 2150, 3225, 61.3, 170.8], // 19-30 ปี
+    [50, 2100, 3150, 60.1, 169.2], // 31-50 ปี
+    [60, 2100, 3150, 59.5, 167.8], // 51-60 ปี
+    [70, 2100, 3150, 58.7, 165.1], // 61-70 ปี
+    [999, 1750, 2625, 56.2, 163.6], // ≥71 ปี
+  ];
+
+  static const List<List<double>> _femaleWaterTable = [
+    [0, 800, 1200, 8.0, 69.4], //   6-11 เดือน
+    [3, 1000, 1500, 12.5, 89.6], // 1-3 ปี
+    [5, 1300, 1950, 18.1, 108.9], // 4-5 ปี
+    [8, 1400, 2100, 22.5, 121.0], // 6-8 ปี
+    [12, 1600, 2400, 36.5, 143.9], // 9-12 ปี
+    [15, 1800, 2550, 47.7, 157.1], // 13-15 ปี
+    [18, 1850, 2775, 48.9, 158.8], // 16-18 ปี
+    [30, 1750, 2625, 53.0, 158.9], // 19-30 ปี
+    [50, 1750, 2625, 52.2, 157.6], // 31-50 ปี
+    [60, 1750, 2625, 51.9, 156.5], // 51-60 ปี
+    [70, 1750, 2625, 49.9, 153.5], // 61-70 ปี
+    [999, 1550, 2325, 48.5, 152.0], // ≥71 ปี
+  ];
+
+  /// คำนวณเป้าหมายการดื่มน้ำต่อวัน (ml) ตามเล่มโครงงาน หัวข้อ 3.1:
+  /// 1. หากลุ่มตามเพศ/อายุ ในตาราง 2.1 (ช่วงน้ำ) และ 2.2 (น้ำหนัก/ส่วนสูงเฉลี่ย)
+  /// 2. น้ำหนัก "และ" ส่วนสูง เกินค่าเฉลี่ยทั้งคู่ → ใช้สูตร น้ำหนัก × 2.2 × 30 / 2
+  ///    โดยไม่ต่ำกว่าค่ากลาง และไม่เกินค่าสูงสุดของตาราง 2.1
+  /// 3. กรณีอื่น → ใช้ค่ากลางของช่วงในตาราง 2.1
+  /// 4. บวกเพิ่ม หญิงตั้งครรภ์ไตรมาส 2-3 (+300) / หญิงให้นมบุตร (+500)
   double _calculateHybridTarget(
     int age,
     String gender,
     double currentWeight,
+    double currentHeight,
     String statusType,
     String statusDetail,
   ) {
-    double baseTarget = 2400;
-    double standardWeight = 60;
+    final table = gender == 'ชาย' ? _maleWaterTable : _femaleWaterTable;
+    final int safeAge = age < 0 ? 0 : age;
+    final List<double> row = table.firstWhere(
+      (r) => safeAge <= r[0],
+      orElse: () => table.last,
+    );
 
-    if (gender == 'ชาย') {
-      if (age <= 0) {
-        baseTarget = 1000;
-        standardWeight = 5.7;
-      } else if (age <= 1) {
-        baseTarget = 1000;
-        standardWeight = 8.7;
-      } else if (age <= 3) {
-        baseTarget = 1250;
-        standardWeight = 13.1;
-      } else if (age <= 5) {
-        baseTarget = 1625;
-        standardWeight = 18.3;
-      } else if (age <= 8) {
-        baseTarget = 1750;
-        standardWeight = 23.0;
-      } else if (age <= 12) {
-        baseTarget = 2125;
-        standardWeight = 35.6;
-      } else if (age <= 15) {
-        baseTarget = 2525;
-        standardWeight = 51.5;
-      } else if (age <= 18) {
-        baseTarget = 2812;
-        standardWeight = 58.3;
-      } else if (age <= 30) {
-        baseTarget = 2687;
-        standardWeight = 61.3;
-      } else if (age <= 70) {
-        baseTarget = 2625;
-        standardWeight = 58.7;
-      } else {
-        baseTarget = 2187;
-        standardWeight = 56.2;
-      }
+    final double minWater = row[1];
+    final double maxWater = row[2];
+    final double avgWeight = row[3];
+    final double avgHeight = row[4];
+    final double midWater = (minWater + maxWater) / 2;
+
+    double target;
+    final bool aboveStandard =
+        currentWeight > avgWeight && currentHeight > avgHeight;
+
+    if (aboveStandard) {
+      // สูตรจาก utils.dart: น้ำหนัก × 2.2 × 30 / 2
+      final double byFormula = calculateDailyTarget(currentWeight);
+      target = byFormula < midWater ? midWater : byFormula;
+      if (target > maxWater) target = maxWater;
     } else {
-      if (age <= 0) {
-        baseTarget = 1000;
-        standardWeight = 5.3;
-      } else if (age <= 1) {
-        baseTarget = 1000;
-        standardWeight = 8.0;
-      } else if (age <= 3) {
-        baseTarget = 1250;
-        standardWeight = 12.5;
-      } else if (age <= 5) {
-        baseTarget = 1625;
-        standardWeight = 18.1;
-      } else if (age <= 8) {
-        baseTarget = 1750;
-        standardWeight = 22.5;
-      } else if (age <= 12) {
-        baseTarget = 2000;
-        standardWeight = 36.5;
-      } else if (age <= 15) {
-        baseTarget = 2175;
-        standardWeight = 47.7;
-      } else if (age <= 18) {
-        baseTarget = 2312;
-        standardWeight = 48.9;
-      } else if (age <= 70) {
-        baseTarget = 2187;
-        standardWeight = 52.2;
-      } else {
-        baseTarget = 1937;
-        standardWeight = 48.5;
-      }
+      target = midWater;
     }
-
-    double ratio = baseTarget / standardWeight;
-    double calculated = ratio * currentWeight;
 
     if (gender == 'หญิง') {
       if (statusType == 'หญิงตั้งครรภ์') {
         if (statusDetail == 'ไตรมาสที่ 2' || statusDetail == 'ไตรมาสที่ 3') {
-          calculated += 300;
+          target += 300;
         }
       } else if (statusType == 'หญิงให้นมบุตร') {
-        calculated += 500;
+        target += 500;
       }
     }
 
-    return calculated.clamp(1000.0, 5000.0);
+    // ปัดเป็นจำนวนเต็ม ให้ทุกหน้าแสดงเลขเดียวกัน
+    return target.roundToDouble();
   }
 
   void _listenFirebase() {
@@ -244,19 +308,47 @@ class _ProfileScreenState extends State<ProfileScreen> {
         final statusDetail =
             mapData['status_detail']?.toString() ?? _statusDetail;
 
-        final target =
-            double.tryParse(
-              '${mapData['daily_target'] ?? _calculateHybridTarget(age, gender, weight, statusType, statusDetail)}',
-            ) ??
-            _calculateHybridTarget(
-              age,
-              gender,
-              weight,
-              statusType,
-              statusDetail,
-            );
+        // ถ้า Firebase ยังไม่มีค่าภาชนะ ให้ถือค่าที่บันทึกล่าสุดเป็นหลัก
+        final cupType = mapData['cup_type']?.toString() ?? _savedCupType;
+        final cupWeight =
+            double.tryParse('${mapData['cup_weight'] ?? _savedCupWeight}') ??
+            _savedCupWeight;
+
+        // 🌟 Firebase (profile/daily_target) เป็นแหล่งเดียวของเป้าหมาย ทุกหน้าอ่านจากที่นี่
+        // คำนวณจากข้อมูลโปรไฟล์ที่บันทึกใน Firebase (ไม่ใช่ค่าที่กำลังแก้ค้างในฟอร์ม)
+        final double target = _calculateHybridTarget(
+          age,
+          gender,
+          weight,
+          height,
+          statusType,
+          statusDetail,
+        );
+        final double? storedTarget = double.tryParse(
+          '${mapData['daily_target']}',
+        );
+
+        // ยังไม่มีค่า หรือค่าเดิมคำนวณจากสูตรเก่า → เขียนค่าใหม่ทับ
+        // ทุกหน้า (โฮม/ประวัติ/AI) จะได้ใช้เป้าหมายเดียวกัน
+        if (storedTarget != target) {
+          smartCupRef('profile').update({'daily_target': target});
+        }
+
+        // ถ้าค่าภาชนะใน Firebase ไม่เปลี่ยน อย่าทับสิ่งที่ผู้ใช้กำลังเลือกค้างไว้
+        // (เช่น ตอนกดสลับภาษา listener จะยิงมาใหม่ทั้งก้อน)
+        final bool cupChangedRemotely =
+            cupType != _savedCupType || cupWeight != _savedCupWeight;
+        final bool keepLocalCup = _isCupDirty && !cupChangedRemotely;
 
         setState(() {
+          _savedCupType = cupType;
+          _savedCupWeight = cupWeight;
+          if (!keepLocalCup) {
+            _cupType = cupType;
+            _cupWeight = cupWeight;
+            _cupWeightController.text = '${_cupWeight.toInt()}';
+          }
+
           _name = name;
           _imagePath = imagePath;
           _profileIcon = profileIcon;
@@ -427,6 +519,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
+  // 🌟 มีไฟล์รูปโปรไฟล์อยู่จริงไหม
+  // รูปจาก image_picker ถูกเก็บในโฟลเดอร์ cache ซึ่งระบบลบได้ (ลงแอปใหม่/ล้างแคช)
+  // ถ้าไฟล์หายไปแล้ว ให้แสดงไอคอนแทน ไม่ให้เกิด PathNotFoundException
+  // (บนเว็บใช้ไฟล์ในเครื่องไม่ได้ จึงแสดงไอคอนเสมอ)
+  bool get _hasProfileImage {
+    if (kIsWeb) return false;
+    final path = _imagePath;
+    if (path == null || path.isEmpty) return false;
+    try {
+      return File(path).existsSync();
+    } catch (_) {
+      return false;
+    }
+  }
+
   IconData _getProfileIconData(String name) {
     switch (name) {
       case 'face':
@@ -506,6 +613,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       age,
       _gender,
       weight,
+      height,
       _statusType,
       _statusDetail,
     );
@@ -540,6 +648,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         'status_type': _statusType,
         'status_detail': _statusDetail,
         'daily_target': target,
+        // ภาชนะ (cup_type / cup_weight) แยกไปบันทึกที่ _saveCup() แล้ว
       });
 
       if (!mounted) return;
@@ -555,6 +664,41 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
+  // 🌟 บันทึกเฉพาะภาชนะ: เขียนแค่ cup_type / cup_weight ไม่แตะข้อมูลโปรไฟล์อื่น
+  // ESP32 อ่าน profile/cup_weight ทุก 5 วินาที จอ OLED จึงอัปเดตตามเองหลังบันทึก
+  Future<void> _saveCup() async {
+    final double cupWeight = _pendingCupWeight.clamp(0.0, 2000.0).toDouble();
+
+    if (!isFirebaseReady()) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(_t('cup_save_failed'))));
+      return;
+    }
+
+    setState(() => _savingCup = true);
+    try {
+      await smartCupRef('profile')
+          .update({'cup_type': _cupType, 'cup_weight': cupWeight});
+
+      if (!mounted) return;
+      setState(() {
+        _cupWeight = cupWeight;
+        _savedCupType = _cupType;
+        _savedCupWeight = cupWeight;
+      });
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(_t('cup_saved_success'))));
+    } catch (e) {
+      debugPrint('Cup save error: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(_t('cup_save_failed'))));
+    } finally {
+      if (mounted) setState(() => _savingCup = false);
+    }
+  }
+
   @override
   void dispose() {
     _subscription?.cancel();
@@ -562,6 +706,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _ageController.dispose();
     _weightController.dispose();
     _heightController.dispose();
+    _cupWeightController.dispose();
     super.dispose();
   }
 
@@ -612,6 +757,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   const SizedBox(height: 22),
                   _buildProfileHeader(),
                   const SizedBox(height: 16),
+                  _buildCupSelectionCard(), // 🌟 การ์ดเลือกแก้ว/ขวดน้ำแบบดรอปดาวน์
+                  const SizedBox(height: 16),
                   _buildTargetCard(),
                   const SizedBox(height: 16),
                   _buildPersonalInfo(),
@@ -628,6 +775,177 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  // 🌟 การ์ดเลือกประเภทแก้ว/ขวดน้ำแบบ Dropdown (ไม่เกะกะ และซ่อนข้อความกรัมที่หักออก)
+  Widget _buildCupSelectionCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(24),
+      decoration: glassDecoration(radius: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const GradientIconChip(
+                icon: Icons.local_cafe_rounded,
+                size: 42,
+                iconSize: 21,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _t('cup_section_title'),
+                      style: const TextStyle(
+                        color: primaryDark,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 16,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      _t('cup_section_subtitle'),
+                      style: const TextStyle(color: textGrey, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          DropdownButtonFormField<String>(
+            // key ผูกกับ _cupType เพื่อให้ dropdown เปลี่ยนตามเมื่อค่าใน Firebase เปลี่ยน
+            key: ValueKey('cup_$_cupType'),
+            initialValue: _cupOptions.any((item) => item['key'] == _cupType)
+                ? _cupType
+                : 'smartcup',
+            dropdownColor: Colors.white,
+            decoration: InputDecoration(
+              filled: true,
+              fillColor: const Color(0xFFE6F4F8),
+              prefixIcon: const Icon(
+                Icons.local_cafe_outlined,
+                color: oceanBlue,
+              ),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide.none,
+              ),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 16,
+                vertical: 12,
+              ),
+            ),
+            items: _cupOptions.map((item) {
+              final String key = item['key'] as String;
+              final double presetWeight = item['weight'] as double;
+              final String label = _t('cup_$key');
+
+              return DropdownMenuItem<String>(
+                value: key,
+                child: Text(
+                  label,
+                  style: const TextStyle(
+                    color: primaryDark,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                  ),
+                ),
+              );
+            }).toList(),
+            onChanged: (String? newKey) {
+              if (newKey != null) {
+                setState(() {
+                  _cupType = newKey;
+                  final selectedOption = _cupOptions.firstWhere(
+                    (item) => item['key'] == newKey,
+                  );
+                  final double presetWeight =
+                      selectedOption['weight'] as double;
+                  if (newKey != 'custom') {
+                    _cupWeight = presetWeight;
+                    _cupWeightController.text = '${presetWeight.toInt()}';
+                  }
+                });
+              }
+            },
+          ),
+          if (_cupType == 'custom') ...[
+            const SizedBox(height: 16),
+            _numberField(
+              controller: _cupWeightController,
+              label: _t('cup_weight_label'),
+              suffix: 'g',
+              icon: Icons.scale_outlined,
+            ),
+          ],
+          const SizedBox(height: 16),
+          // 🌟 ปุ่มบันทึกภาชนะ (แยกจากปุ่มบันทึกข้อมูลโปรไฟล์)
+          Row(
+            children: [
+              if (_isCupDirty)
+                Expanded(
+                  child: Row(
+                    children: [
+                      const Icon(Icons.circle, size: 8, color: coral),
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          _t('cup_unsaved'),
+                          style: const TextStyle(
+                            color: coral,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              else
+                const Spacer(),
+              const SizedBox(width: 12),
+              ElevatedButton.icon(
+                onPressed: (_isCupDirty && !_savingCup) ? _saveCup : null,
+                icon: _savingCup
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.check_rounded, size: 18),
+                label: Text(_t('save_cup')),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: oceanBlue,
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: oceanBlue.withValues(alpha: 0.25),
+                  disabledForegroundColor: Colors.white,
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 12,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  textStyle: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -731,14 +1049,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             blurRadius: 22,
                           ),
                         ],
-                        image: (_imagePath != null && _imagePath!.isNotEmpty)
+                        image: _hasProfileImage
                             ? DecorationImage(
                                 image: FileImage(File(_imagePath!)),
                                 fit: BoxFit.cover,
                               )
                             : null,
                       ),
-                      child: (_imagePath == null || _imagePath!.isEmpty)
+                      child: !_hasProfileImage
                           ? Icon(
                               _getProfileIconData(_profileIcon),
                               color: oceanBlue,
@@ -818,6 +1136,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 Icons.height_rounded,
                 '${_height.toStringAsFixed(0)} cm',
               ),
+              // 🌟 ลบการแสดงผลจำนวนกรัมที่หักออกตรงนี้ออกแล้ว ตามคำขอ
             ],
           ),
         ],
@@ -859,7 +1178,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             textBaseline: TextBaseline.alphabetic,
             children: [
               Text(
-                '${_dailyTarget.toInt()}',
+                formatNumber(_dailyTarget), // รูปแบบเดียวกับหน้าโฮม
                 style: const TextStyle(
                   color: oceanBlue,
                   fontSize: 48,
@@ -874,6 +1193,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   color: textGrey,
                   fontSize: 18,
                   fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(width: 8),
+              // 🌟 เป้าหมายเป็นจำนวนแก้ว (1 แก้ว = 240 ml)
+              Flexible(
+                child: Text(
+                  formatGlasses(_dailyTarget, lang: _selectedLanguage),
+                  style: const TextStyle(
+                    color: textGrey,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
               ),
             ],
@@ -951,7 +1282,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
             }).toList(),
           ),
 
-          // 🌟 ฟื้นฟูระบบตั้งครรภ์/ให้นมบุตร สำหรับเพศหญิง
           if (_gender == 'หญิง') ...[
             const SizedBox(height: 16),
             Text(

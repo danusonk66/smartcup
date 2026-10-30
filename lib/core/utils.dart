@@ -49,3 +49,18 @@ TimeOfDay parseTOD(dynamic raw) {
 String formatNumber(num value) {
   return value.toStringAsFixed(0);
 }
+
+/// ปริมาตรน้ำ 1 แก้ว (ml)
+const double mlPerGlass = 240;
+
+/// แปลง ml เป็นจำนวนแก้ว (1 แก้ว = 240 ml) ทศนิยม 1 ตำแหน่ง ตัด .0 ทิ้ง
+/// เช่น 2688 → "(11.2 แก้ว)", 480 → "(2 แก้ว)" / อังกฤษ: "(11.2 glasses)"
+String formatGlasses(num ml, {String lang = 'th'}) {
+  final double glasses = ml <= 0 ? 0 : ml / mlPerGlass;
+  String text = glasses.toStringAsFixed(1);
+  if (text.endsWith('.0')) text = text.substring(0, text.length - 2);
+  if (lang == 'en') {
+    return '($text ${text == '1' ? 'glass' : 'glasses'})';
+  }
+  return '($text แก้ว)';
+}

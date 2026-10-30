@@ -8,7 +8,6 @@ import 'package:firebase_database/firebase_database.dart';
 
 import '../core/theme.dart';
 import '../core/utils.dart';
-import 'battery_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -19,13 +18,16 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   double _currentDisplayWeight = 0;
-  double _lastStableWeight = 0;
-  double _pendingWeight = -1;
-  Timer? _debounceTimer;
+
+  // ข้อมูลล่าสุดจาก Firebase เก็บไว้คำนวณใหม่ทุกนาที (เช่น ข้ามเที่ยงคืน, "วันนี้/เมื่อวาน")
+  Map<dynamic, dynamic>? _latestData;
+  Timer? _clockTimer;
 
   double _todayTotal = 0;
   double _dailyTarget = 2400;
   double _battery = 100;
+  double _cupWeight =
+      0; // น้ำหนักภาชนะจาก profile/cup_weight (ใช้หักออกตอนแสดงผล)
   String _userName = 'สมชาย';
   String _selectedLanguage =
       'th'; // 🌟 ตัวแปรที่ซิงค์กับหน้าโปรไฟล์ผ่าน Firebase
@@ -34,12 +36,8 @@ class _HomeScreenState extends State<HomeScreen> {
   String _lastDrinkSubtitle = 'ยังไม่มีประวัติ';
 
   String _currentDrinkType = 'น้ำเปล่า'; // เก็บค่าภาษาไทยเพื่ออ้างอิงในระบบ
-  String _lastDrinkTime = '08:00';
-  String _sinceLastDrink = '0h 0m';
 
   int _streakDays = 0;
-  bool _isInitialLoad = true;
-  String _lastLoadedDateKey = "";
 
   StreamSubscription<DatabaseEvent>? _subscription;
 
@@ -53,11 +51,15 @@ class _HomeScreenState extends State<HomeScreen> {
   ];
 
   // 🌟 พจนานุกรมแปลภาษาหน้าแรก
-  final Map<String, Map<String, String>> _homeTexts = {
+  // static const: เพิ่ม/แก้ข้อความแล้ว Hot Reload เห็นทันที ไม่ต้อง Hot Restart
+  static const Map<String, Map<String, String>> _homeTexts = {
     'th': {
       'greeting': 'สวัสดี, ',
       'progress': 'ความคืบหน้า: ',
       'from_goal': 'จากเป้าหมาย ',
+      'remaining_line': 'ต้องดื่มอีก ',
+      'drunk_label': 'ดื่มแล้ว ',
+      'goal_reached': 'ดื่มครบเป้าหมายแล้ว 🎉',
       'water_in_cup': 'น้ำในแก้วตอนนี้: ',
       'miss_target': 'ยังขาดอีก ',
       'miss_target_hint': ' ml ถึงเป้าหมาย\nลองแบ่งจิบเรื่อยๆ ดูนะ!',
@@ -66,13 +68,13 @@ class _HomeScreenState extends State<HomeScreen> {
       'days': ' วัน',
       'keep_it_up': 'เก่งมาก!',
       'select_drink': 'เลือกเครื่องดื่มในแก้ว',
-      'reset_title': 'ตั้งค่าระบบใหม่',
-      'reset_subtitle': 'รีเซ็ตยอดสะสมกรณีที่ข้อมูลผิดพลาด',
-      'reset_button': 'รีเซ็ตข้อมูลน้ำวันนี้',
+      'reset_title': 'จัดการน้ำในแก้ว',
+      'reset_subtitle': 'กดก่อนวางแก้วกลับ เมื่อเทน้ำทิ้งหรือล้างแก้ว น้ำที่เททิ้งจะไม่ถูกนับเป็นยอดดื่ม',
+      'reset_button': 'ล้างแก้ว (เริ่มนับน้ำในแก้วใหม่)',
       'today': 'วันนี้ • ',
       'yesterday': 'เมื่อวาน • ',
       'no_history': 'ยังไม่มีประวัติ',
-      'reset_success': 'รีเซ็ตข้อมูลปริมาณน้ำวันนี้แล้ว',
+      'reset_success': 'ส่งคำสั่งล้างแก้วแล้ว เครื่องจะเริ่มนับใหม่ (น้ำที่เททิ้งไม่นับเป็นยอดดื่ม)',
       'water': 'น้ำเปล่า',
       'juice': 'น้ำผลไม้',
       'coffee_tea': 'กาแฟ/ชา',
@@ -84,6 +86,9 @@ class _HomeScreenState extends State<HomeScreen> {
       'greeting': 'Hello, ',
       'progress': 'Progress: ',
       'from_goal': 'Goal: ',
+      'remaining_line': 'Remaining: ',
+      'drunk_label': 'Drank ',
+      'goal_reached': 'Daily goal reached 🎉',
       'water_in_cup': 'Current water in cup: ',
       'miss_target': '',
       'miss_target_hint':
@@ -93,13 +98,13 @@ class _HomeScreenState extends State<HomeScreen> {
       'days': ' days',
       'keep_it_up': 'Great job!',
       'select_drink': 'Select drink in cup',
-      'reset_title': 'System Settings',
-      'reset_subtitle': 'Reset today\'s intake if data is incorrect',
-      'reset_button': 'Reset today\'s data',
+      'reset_title': 'Cup Management',
+      'reset_subtitle': 'Press before putting the cup back after emptying or washing it. Poured-out water won\'t count as drunk.',
+      'reset_button': 'Wash Cup (Restart cup count)',
       'today': 'Today • ',
       'yesterday': 'Yesterday • ',
       'no_history': 'No history yet',
-      'reset_success': 'Today\'s water intake reset successfully',
+      'reset_success': 'Wash request sent. The cup will restart its count (poured-out water won\'t count).',
       'water': 'Water',
       'juice': 'Juice',
       'coffee_tea': 'Coffee/Tea',
@@ -110,7 +115,23 @@ class _HomeScreenState extends State<HomeScreen> {
   };
 
   String _t(String key) {
-    return _homeTexts[_selectedLanguage]?[key] ?? key;
+    return _homeTexts[_selectedLanguage]?[key] ??
+        _homeTexts['th']?[key] ??
+        key.replaceAll('_', ' ');
+  }
+
+  // 🌟 น้ำในแก้วสุทธิ = น้ำหนักรวม - น้ำหนักภาชนะ (สูตรเดียวกับจอ OLED บน ESP32)
+  // 🌟 เกณฑ์ "ยกแก้วออก": น้ำหนักรวมต่ำกว่านี้ = ไม่มีแก้วบนเครื่อง
+  // แก้วหนัก (≥ 40 g) ใช้ 20 g เหมือนเดิม / แก้วเบาใช้ครึ่งหนึ่งของน้ำหนักแก้ว แต่ไม่ต่ำกว่า 5 g
+  // (สูตรเดียวกับ ESP32) กันขวดพลาสติกเปล่าถูกเข้าใจว่ายกออก แล้วไม่นับอึกสุดท้าย
+  double get _liftThreshold {
+    if (_cupWeight >= 40) return 20;
+    return math.max(5, _cupWeight / 2).toDouble();
+  }
+
+  double _netWater(double gross) {
+    if (gross < _liftThreshold) return 0;
+    return math.max(0, gross - _cupWeight).toDouble();
   }
 
   // แปลงประเภทเครื่องดื่มให้สอดคล้องกับภาษา
@@ -137,8 +158,11 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _lastLoadedDateKey = _getCurrentDateKey();
     _listenFirebase();
+    // คำนวณใหม่ทุกนาที: ยอดวันนี้จะเป็น 0 เองเมื่อข้ามเที่ยงคืน แม้ไม่มีข้อมูลใหม่เข้ามา
+    _clockTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (_latestData != null && mounted) _applyData(_latestData!);
+    });
   }
 
   String _getCurrentDateKey() {
@@ -262,6 +286,32 @@ class _HomeScreenState extends State<HomeScreen> {
     _lastDrinkAmount = foundAmount;
   }
 
+  // 🌟 นับวันต่อเนื่องจากประวัติจริง (ไม่ต้องเก็บ streak แยกแล้วคอยรีเซ็ต)
+  // วันนี้ครบเป้าแล้วนับวันนี้ด้วย ถ้ายังไม่ครบเริ่มนับจากเมื่อวานย้อนหลังไป
+  int _computeStreak(Map<dynamic, dynamic> historyMap, double target) {
+    if (target <= 0) return 0;
+    double totalOf(DateTime d) {
+      final key =
+          "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}";
+      final day = historyMap[key];
+      if (day is Map) return double.tryParse('${day['daily_total']}') ?? 0;
+      return 0;
+    }
+
+    final now = DateTime.now();
+    DateTime day = DateTime(now.year, now.month, now.day);
+    int streak = 0;
+    if (totalOf(day) >= target) streak = 1;
+    day = day.subtract(const Duration(days: 1));
+    while (streak < 365 && totalOf(day) >= target) {
+      streak++;
+      day = day.subtract(const Duration(days: 1));
+    }
+    return streak;
+  }
+
+  // 🌟 หน้าโฮมแสดงผลอย่างเดียว การตรวจจับการดื่ม/บันทึกยอดอยู่ใน ESP32 แล้ว
+  // (นับได้ถูกต้องแม้ไม่ได้เปิดแอป)
   void _listenFirebase() {
     if (!isFirebaseReady()) return;
 
@@ -269,225 +319,75 @@ class _HomeScreenState extends State<HomeScreen> {
       _subscription = smartCupRef().onValue.listen((event) {
         final data = event.snapshot.value;
         if (data == null) return;
-
-        Map<dynamic, dynamic> mapData;
         try {
-          mapData = Map<dynamic, dynamic>.from(data as dynamic);
-        } catch (_) {
-          return;
-        }
-
-        double rawWeight = double.tryParse('${mapData['weight']}') ?? 0;
-
-        double newDailyTarget = 2400;
-        String newName = _userName;
-        String newLang = _selectedLanguage;
-
-        // 🌟 ดึงภาษาและโปรไฟล์จาก Firebase แบบ Realtime
-        if (mapData['profile'] != null) {
-          try {
-            final profileMap = Map<dynamic, dynamic>.from(
-              mapData['profile'] as dynamic,
-            );
-            newDailyTarget =
-                double.tryParse('${profileMap['daily_target']}') ?? 2400;
-            newName = profileMap['name']?.toString() ?? _userName;
-            newLang = profileMap['language']?.toString() ?? _selectedLanguage;
-          } catch (_) {}
-        }
-
-        String currentDateKey = _getCurrentDateKey();
-
-        if (_lastLoadedDateKey != currentDateKey) {
-          if (mapData['history_logs'] != null) {
-            Map<dynamic, dynamic> historyMap = Map<dynamic, dynamic>.from(
-              mapData['history_logs'],
-            );
-            if (historyMap[_lastLoadedDateKey] != null) {
-              double yesterdayTotal =
-                  double.tryParse(
-                    '${historyMap[_lastLoadedDateKey]['daily_total']}',
-                  ) ??
-                  0;
-              if (yesterdayTotal < newDailyTarget) {
-                smartCupRef().update({'streak_days': 0});
-              }
-            } else {
-              smartCupRef().update({'streak_days': 0});
-            }
-          } else {
-            smartCupRef().update({'streak_days': 0});
-          }
-
-          _todayTotal = 0;
-          _lastLoadedDateKey = currentDateKey;
-
-          smartCupRef().update({
-            'last_stable_weight': rawWeight < 20 ? 0 : rawWeight,
-          });
-        }
-
-        double fbTodayTotal = 0;
-        if (mapData['history_logs'] != null) {
-          Map<dynamic, dynamic> historyMap = Map<dynamic, dynamic>.from(
-            mapData['history_logs'],
-          );
-          if (historyMap[currentDateKey] != null) {
-            fbTodayTotal =
-                double.tryParse(
-                  '${historyMap[currentDateKey]['daily_total']}',
-                ) ??
-                0;
-          }
-          _cleanOldHistoryLogs(historyMap);
-        }
-
-        _calculateLatestDrink(mapData);
-
-        double fbLastStable =
-            double.tryParse('${mapData['last_stable_weight']}') ?? 0;
-
-        if (_isInitialLoad) {
-          _todayTotal = fbTodayTotal;
-
-          if (rawWeight >= 20 &&
-              fbLastStable >= 20 &&
-              rawWeight < fbLastStable) {
-            double missedDiff = fbLastStable - rawWeight;
-            if (missedDiff >= 15) {
-              double prevTotal = _todayTotal;
-              _todayTotal += missedDiff;
-              final int nowMs = DateTime.now().millisecondsSinceEpoch;
-              final String nowTime = formatTOD(TimeOfDay.now());
-
-              Map<String, Object> updates = {
-                'last_stable_weight': rawWeight,
-                'last_drink_amount': missedDiff,
-                'last_drink_time': nowTime,
-                'last_drink_timestamp': nowMs,
-                'history_logs/$currentDateKey/daily_total': _todayTotal,
-                'history_logs/$currentDateKey/logs/$nowMs': {
-                  'time': nowTime,
-                  'amount': missedDiff,
-                  'type': _currentDrinkType,
-                  'timestamp': nowMs,
-                },
-              };
-
-              if (prevTotal < newDailyTarget && _todayTotal >= newDailyTarget) {
-                int currentStreak =
-                    int.tryParse('${mapData['streak_days']}') ?? 0;
-                updates['streak_days'] = currentStreak + 1;
-              }
-
-              smartCupRef().update(updates);
-              fbLastStable = rawWeight;
-              _lastDrinkAmount = missedDiff;
-              _lastDrinkSubtitle = '${_t('today')}$nowTime';
-            }
-          } else if (fbLastStable == 0 && rawWeight >= 20) {
-            smartCupRef().update({'last_stable_weight': rawWeight});
-            fbLastStable = rawWeight;
-          }
-
-          _lastStableWeight = fbLastStable;
-          _pendingWeight = rawWeight;
-
-          setState(() {
-            _userName = newName;
-            _selectedLanguage = newLang;
-            _currentDisplayWeight = rawWeight < 20 ? 0 : rawWeight;
-            _isInitialLoad = false;
-          });
-        } else {
-          setState(() {
-            if (_lastLoadedDateKey == currentDateKey) {
-              _todayTotal = fbTodayTotal;
-            }
-            _userName = newName;
-            _selectedLanguage = newLang; // 🌟 อัปเดตภาษาจาก Firebase อัตโนมัติ
-            _dailyTarget = newDailyTarget;
-            _battery =
-                double.tryParse('${mapData['battery_percent']}') ?? _battery;
-            _currentDrinkType =
-                mapData['current_drink_type']?.toString() ?? _currentDrinkType;
-
-            if (!_drinkTypes.contains(_currentDrinkType)) {
-              _currentDrinkType = 'น้ำเปล่า';
-            }
-
-            _lastDrinkTime =
-                mapData['last_drink_time']?.toString() ?? _lastDrinkTime;
-            _sinceLastDrink =
-                mapData['since_last_drink']?.toString() ?? _sinceLastDrink;
-            _streakDays =
-                int.tryParse('${mapData['streak_days']}') ?? _streakDays;
-          });
-
-          if ((rawWeight - _pendingWeight).abs() > 15) {
-            _pendingWeight = rawWeight;
-            _debounceTimer?.cancel();
-
-            _debounceTimer = Timer(const Duration(seconds: 5), () {
-              if (!mounted) return;
-
-              double finalWeight = _pendingWeight;
-
-              setState(() {
-                _currentDisplayWeight = finalWeight < 20 ? 0 : finalWeight;
-              });
-
-              if (finalWeight >= 20) {
-                if (_lastStableWeight >= 20 &&
-                    finalWeight < _lastStableWeight) {
-                  double diff = _lastStableWeight - finalWeight;
-
-                  if (diff >= 15) {
-                    double prevTotal = _todayTotal;
-                    double updatedTotal = _todayTotal + diff;
-                    final int nowMs = DateTime.now().millisecondsSinceEpoch;
-                    final String nowTime = formatTOD(TimeOfDay.now());
-
-                    Map<String, Object> updates = {
-                      'last_stable_weight': finalWeight,
-                      'last_drink_amount': diff,
-                      'last_drink_time': nowTime,
-                      'last_drink_timestamp': nowMs,
-                      'history_logs/$currentDateKey/daily_total': updatedTotal,
-                      'history_logs/$currentDateKey/logs/$nowMs': {
-                        'time': nowTime,
-                        'amount': diff,
-                        'type': _currentDrinkType,
-                        'timestamp': nowMs,
-                      },
-                    };
-
-                    if (prevTotal < newDailyTarget &&
-                        updatedTotal >= newDailyTarget) {
-                      int currentStreak =
-                          int.tryParse('${mapData['streak_days']}') ?? 0;
-                      updates['streak_days'] = currentStreak + 1;
-                    }
-
-                    smartCupRef().update(updates);
-                    _lastDrinkAmount = diff;
-                    _lastDrinkSubtitle = '${_t('today')}$nowTime';
-                  } else {
-                    smartCupRef().update({'last_stable_weight': finalWeight});
-                  }
-                } else if (finalWeight > _lastStableWeight + 15) {
-                  smartCupRef().update({'last_stable_weight': finalWeight});
-                }
-
-                _lastStableWeight = finalWeight;
-              }
-            });
-          }
-        }
+          final mapData = Map<dynamic, dynamic>.from(data as dynamic);
+          _latestData = mapData;
+          _applyData(mapData);
+        } catch (_) {}
       });
     } catch (e) {
       debugPrint('❌ [Home] Logic error: $e');
     }
+  }
+
+  void _applyData(Map<dynamic, dynamic> mapData) {
+    final double rawWeight = double.tryParse('${mapData['weight']}') ?? 0;
+
+    double newDailyTarget = 2400;
+    String newName = _userName;
+    String newLang = _selectedLanguage;
+
+    if (mapData['profile'] is Map) {
+      final profileMap = Map<dynamic, dynamic>.from(
+        mapData['profile'] as dynamic,
+      );
+      newDailyTarget = double.tryParse('${profileMap['daily_target']}') ?? 2400;
+      newName = profileMap['name']?.toString() ?? _userName;
+      newLang = profileMap['language']?.toString() ?? _selectedLanguage;
+      _cupWeight = double.tryParse('${profileMap['cup_weight']}') ?? _cupWeight;
+    }
+
+    final String todayKey = _getCurrentDateKey();
+    double todayTotal = 0;
+    int streak = 0;
+    if (mapData['history_logs'] is Map) {
+      final historyMap = Map<dynamic, dynamic>.from(
+        mapData['history_logs'] as dynamic,
+      );
+      final today = historyMap[todayKey];
+      if (today is Map) {
+        todayTotal = double.tryParse('${today['daily_total']}') ?? 0;
+      }
+      streak = _computeStreak(historyMap, newDailyTarget);
+      _cleanOldHistoryLogs(historyMap);
+    }
+
+    // เก็บ streak ลง Firebase ไว้ให้หน้า AI ใช้ (เขียนเฉพาะตอนค่าเปลี่ยน)
+    final int storedStreak = int.tryParse('${mapData['streak_days']}') ?? -1;
+    if (storedStreak != streak) {
+      smartCupRef().update({'streak_days': streak});
+    }
+
+    _selectedLanguage =
+        newLang; // ให้ข้อความ "วันนี้/เมื่อวาน" ใช้ภาษาที่ถูกต้อง
+    _calculateLatestDrink(mapData);
+
+    String drinkType =
+        mapData['current_drink_type']?.toString() ?? _currentDrinkType;
+    if (!_drinkTypes.contains(drinkType)) drinkType = 'น้ำเปล่า';
+
+    if (!mounted) return;
+    setState(() {
+      _userName = newName;
+      _selectedLanguage = newLang;
+      _dailyTarget = newDailyTarget;
+      _todayTotal = todayTotal;
+      _streakDays = streak;
+      _battery = double.tryParse('${mapData['battery_percent']}') ?? _battery;
+      _currentDrinkType = drinkType;
+      // ESP32 ส่งเฉพาะน้ำหนักที่นิ่งแล้ว แสดงได้ทันที
+      _currentDisplayWeight = _netWater(rawWeight);
+    });
   }
 
   Future<void> _selectDrink(String? translatedType) async {
@@ -513,37 +413,27 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {}
   }
 
+  // 🌟 ปุ่มล้างแก้ว: ส่งคำขอให้ ESP32 ตั้งจุดเริ่มนับใหม่
+  // ESP32 จะไม่นับน้ำที่หายไปครั้งถัดไปเป็นการดื่ม (เพราะคือน้ำที่เททิ้ง)
+  // แล้วเริ่มนับจากน้ำหนักที่วางอยู่ตอนนั้น
   Future<void> _resetWater() async {
     if (!isFirebaseReady()) return;
 
     try {
-      final snapshot = await smartCupRef('weight').get();
-      final currentWeight = double.tryParse('${snapshot.value}') ?? 0.0;
-      String dateKey = _getCurrentDateKey();
-
-      await smartCupRef().update({
-        'last_stable_weight': currentWeight,
-        'history_logs/$dateKey': null,
-      });
-
-      _lastStableWeight = currentWeight >= 20 ? currentWeight : 0;
-      _pendingWeight = currentWeight;
-
-      setState(() {
-        _currentDisplayWeight = currentWeight < 20 ? 0 : currentWeight;
-      });
+      await smartCupRef('control').update({'reset_baseline': true});
 
       if (!mounted) return;
-
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(_t('reset_success'))));
-      // ignore: empty_catches
-    } catch (e) {}
+    } catch (e) {
+      debugPrint('Reset request error: $e');
+    }
   }
 
   @override
   void dispose() {
-    _debounceTimer?.cancel();
+    _clockTimer?.cancel();
     _subscription?.cancel();
     super.dispose();
   }
@@ -619,43 +509,29 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
         const SizedBox(width: 12),
-        Material(
-          color: Colors.white.withValues(alpha: 0.7),
-          shape: StadiumBorder(
-            side: BorderSide(color: Colors.white.withValues(alpha: 0.95)),
-          ),
-          child: InkWell(
-            customBorder: const StadiumBorder(),
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => BatteryScreen(battery: _battery),
-                ),
-              );
-            },
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.battery_charging_full,
-                    color: batteryColor,
-                    size: 20,
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    '${_battery.toInt()}%',
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 15,
-                      color: textDark,
-                    ),
-                  ),
-                ],
-              ),
+        // แสดงค่าแบตเตอรี่อย่างเดียว (ไม่สามารถกดเข้าไปดูรายละเอียดได้)
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: ShapeDecoration(
+            color: Colors.white.withValues(alpha: 0.7),
+            shape: StadiumBorder(
+              side: BorderSide(color: Colors.white.withValues(alpha: 0.95)),
             ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.battery_charging_full, color: batteryColor, size: 20),
+              const SizedBox(width: 6),
+              Text(
+                '${_battery.toInt()}%',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: textDark,
+                ),
+              ),
+            ],
           ),
         ),
       ],
@@ -680,6 +556,15 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Text.rich(
             TextSpan(
               children: [
+                // 🌟 ป้าย "ดื่มแล้ว" หน้าตัวเลขยอดดื่มวันนี้
+                TextSpan(
+                  text: _t('drunk_label'),
+                  style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w600,
+                    color: textGrey,
+                  ),
+                ),
                 TextSpan(
                   text: formatNumber(_todayTotal),
                   style: const TextStyle(
@@ -697,15 +582,40 @@ class _HomeScreenState extends State<HomeScreen> {
                     color: oceanBlue,
                   ),
                 ),
+                // 🌟 ปริมาณที่ดื่มแล้วเป็นจำนวนแก้ว (1 แก้ว = 240 ml)
+                TextSpan(
+                  text:
+                      ' ${formatGlasses(_todayTotal, lang: _selectedLanguage)}',
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w500,
+                    color: textGrey,
+                  ),
+                ),
               ],
             ),
           ),
         ),
         const SizedBox(height: 2),
         Text(
-          '${_t('from_goal')}${formatNumber(_dailyTarget)} ml',
+          '${_t('from_goal')}${formatNumber(_dailyTarget)} ml '
+          '${formatGlasses(_dailyTarget, lang: _selectedLanguage)}',
           textAlign: TextAlign.center,
           style: const TextStyle(color: textGrey, fontSize: 15),
+        ),
+        const SizedBox(height: 4),
+        // 🌟 ปริมาณที่เหลือต้องดื่ม (ml + แก้ว) หรือข้อความเมื่อครบเป้าหมาย
+        Text(
+          remaining > 0
+              ? '${_t('remaining_line')}${formatNumber(remaining)} ml '
+                    '${formatGlasses(remaining, lang: _selectedLanguage)}'
+              : _t('goal_reached'),
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: remaining > 0 ? oceanBlue : accentGreen,
+            fontSize: 15,
+            fontWeight: FontWeight.w700,
+          ),
         ),
         const SizedBox(height: 16),
         Center(
@@ -986,7 +896,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // ปุ่มรีเซ็ตถูกลดน้ำหนักลง ให้ไม่แย่งความสนใจจากข้อมูลหลัก
+  // ปุ่มล้างแก้ว (เคลียร์ค่าน้ำในแก้วปัจจุบันเป็น 0 โดยไม่กระทบยอดรวมของวันนี้)
   Widget _buildResetButton() {
     return Column(
       children: [
@@ -1007,10 +917,10 @@ class _HomeScreenState extends State<HomeScreen> {
         const SizedBox(height: 12),
         TextButton.icon(
           onPressed: _resetWater,
-          icon: const Icon(Icons.refresh_rounded, size: 18),
+          icon: const Icon(Icons.cleaning_services_rounded, size: 18),
           label: Text(_t('reset_button')),
           style: TextButton.styleFrom(
-            foregroundColor: const Color(0xFFC62828),
+            foregroundColor: oceanBlue,
             padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
             textStyle: const TextStyle(
               fontSize: 14,

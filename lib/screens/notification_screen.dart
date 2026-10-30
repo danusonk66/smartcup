@@ -21,6 +21,10 @@ class _NotificationScreenState extends State<NotificationScreen> {
   int _alertHours = 2;
   int _alertMinutes = 0;
 
+  // 🌟 ตัวแปรสำหรับแจ้งเตือนก่อนเวลานอน
+  int _beforeBedHours = 0;
+  int _beforeBedMinutes = 30;
+
   TimeOfDay _quietStart = const TimeOfDay(hour: 22, minute: 0);
   TimeOfDay _quietEnd = const TimeOfDay(hour: 6, minute: 0);
   String _selectedLanguage = 'th'; // 🌟 ตัวแปรภาษา
@@ -35,7 +39,7 @@ class _NotificationScreenState extends State<NotificationScreen> {
   StreamSubscription<DatabaseEvent>? _logsSubscription;
 
   // 🌟 พจนานุกรมแปลภาษาหน้าการแจ้งเตือน
-  final Map<String, Map<String, String>> _notiTexts = {
+  static const Map<String, Map<String, String>> _notiTexts = {
     'th': {
       'title': 'การแจ้งเตือน',
       'subtitle': 'ตั้งค่าการแจ้งเตือนของ SmartCup',
@@ -43,9 +47,12 @@ class _NotificationScreenState extends State<NotificationScreen> {
       'freq_title': 'ความถี่ในการแจ้งเตือน',
       'hour': 'ชั่วโมง',
       'hr': 'ชม.',
-      'min': 'น.',
+      'min': 'นาที',
+      'minute': 'นาที',
       'custom': 'กำหนดเอง',
       'quiet_time': 'ช่วงเวลาปิดเสียงแจ้งเตือน',
+      'before_bed_title': 'แจ้งเตือนก่อนเวลานอน',
+      'off': 'ปิด',
       'start': 'เริ่มต้น',
       'end': 'สิ้นสุด',
       'save_settings': 'บันทึกการตั้งค่า',
@@ -56,6 +63,7 @@ class _NotificationScreenState extends State<NotificationScreen> {
       'ok': 'ตกลง',
       'select_duration': 'เลือกระยะเวลา',
       'time_to_drink': 'ถึงเวลาที่ควรดื่มน้ำ',
+      'bedtime_msg': 'ใกล้ถึงเวลานอนแล้ว ดื่มน้ำให้ครบเป้าหมายนะ',
     },
     'en': {
       'title': 'Notifications',
@@ -65,8 +73,11 @@ class _NotificationScreenState extends State<NotificationScreen> {
       'hour': 'Hour',
       'hr': 'hr',
       'min': 'm',
+      'minute': 'Min',
       'custom': 'Custom',
       'quiet_time': 'Do Not Disturb (Quiet Time)',
+      'before_bed_title': 'Alert Before Bedtime',
+      'off': 'Off',
       'start': 'Start',
       'end': 'End',
       'save_settings': 'Save Settings',
@@ -77,6 +88,7 @@ class _NotificationScreenState extends State<NotificationScreen> {
       'ok': 'OK',
       'select_duration': 'Select Duration',
       'time_to_drink': 'Time to drink water',
+      'bedtime_msg': 'Bedtime is coming up. Finish your water goal!',
     },
   };
 
@@ -178,6 +190,18 @@ class _NotificationScreenState extends State<NotificationScreen> {
           _alertMinutes =
               int.tryParse('${mapData['alert_minutes'] ?? _alertMinutes}') ??
               _alertMinutes;
+
+          // 🌟 ดึงค่าแจ้งเตือนก่อนเวลานอนจาก Firebase
+          _beforeBedHours =
+              int.tryParse(
+                '${mapData['before_bed_hours'] ?? _beforeBedHours}',
+              ) ??
+              _beforeBedHours;
+          _beforeBedMinutes =
+              int.tryParse(
+                '${mapData['before_bed_minutes'] ?? _beforeBedMinutes}',
+              ) ??
+              _beforeBedMinutes;
 
           if (mapData['quiet_start'] != null) {
             _quietStart = parseTOD(mapData['quiet_start']);
@@ -282,6 +306,9 @@ class _NotificationScreenState extends State<NotificationScreen> {
         'alert_hours': _alertHours,
         'alert_minutes': _alertMinutes,
         'interval_minutes': (_alertHours * 60) + _alertMinutes,
+        'before_bed_hours': _beforeBedHours,
+        'before_bed_minutes': _beforeBedMinutes,
+        'before_bed_total_minutes': (_beforeBedHours * 60) + _beforeBedMinutes,
         'quiet_start': formatTOD(_quietStart),
         'quiet_end': formatTOD(_quietEnd),
       });
@@ -362,6 +389,90 @@ class _NotificationScreenState extends State<NotificationScreen> {
                         setState(() {
                           _alertHours = tempHours;
                           _alertMinutes = tempMinutes;
+                        });
+                        Navigator.pop(context);
+                      },
+                      child: Text(
+                        _t('ok'),
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: oceanBlue,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: CupertinoTimerPicker(
+                  mode: CupertinoTimerPickerMode.hm,
+                  initialTimerDuration: Duration(
+                    hours: tempHours,
+                    minutes: tempMinutes,
+                  ),
+                  onTimerDurationChanged: (Duration newDuration) {
+                    tempHours = newDuration.inHours;
+                    tempMinutes = newDuration.inMinutes % 60;
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // 🌟 ตัวเลือกกำหนดเวลาก่อนนอนแบบกำหนดเอง (ชั่วโมง/นาที)
+  void _showBeforeBedPicker() {
+    int tempHours = _beforeBedHours;
+    int tempMinutes = _beforeBedMinutes;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (BuildContext builder) {
+        return SizedBox(
+          height: 300,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: Text(
+                        _t('cancel'),
+                        style: const TextStyle(
+                          fontSize: 16,
+                          color: Colors.grey,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      _t('select_duration'),
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: primaryDark,
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () {
+                        setState(() {
+                          _beforeBedHours = tempHours;
+                          _beforeBedMinutes = tempMinutes;
                         });
                         Navigator.pop(context);
                       },
@@ -616,6 +727,20 @@ class _NotificationScreenState extends State<NotificationScreen> {
   }
 
   Widget _buildQuietSetting() {
+    bool isOff = _beforeBedHours == 0 && _beforeBedMinutes == 0;
+    bool is15m = _beforeBedHours == 0 && _beforeBedMinutes == 15;
+    bool is30m = _beforeBedHours == 0 && _beforeBedMinutes == 30;
+    bool is1h = _beforeBedHours == 1 && _beforeBedMinutes == 0;
+    bool isCustomBeforeBed = !(isOff || is15m || is30m || is1h);
+
+    String customBeforeBedLabel = _t('custom');
+    if (isCustomBeforeBed) {
+      List<String> parts = [];
+      if (_beforeBedHours > 0) parts.add('$_beforeBedHours ${_t('hr')}');
+      if (_beforeBedMinutes > 0) parts.add('$_beforeBedMinutes ${_t('min')}');
+      customBeforeBedLabel = parts.join(' ');
+    }
+
     return Container(
       padding: const EdgeInsets.all(22),
       decoration: glassDecoration(radius: 24),
@@ -662,6 +787,80 @@ class _NotificationScreenState extends State<NotificationScreen> {
                   time: _quietEnd,
                   onTap: () => _pickTime(start: false),
                 ),
+              ),
+            ],
+          ),
+          // 🌟 ส่วนตั้งค่าแจ้งเตือนก่อนเวลานอน
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 18),
+            child: Divider(height: 1, color: oceanBlue.withValues(alpha: 0.10)),
+          ),
+          Text(
+            _t('before_bed_title'),
+            style: const TextStyle(
+              color: primaryDark,
+              fontWeight: FontWeight.w700,
+              fontSize: 15,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Wrap(
+            spacing: 8,
+            runSpacing: 10,
+            children: [
+              _freqChip(
+                label: _t('off'),
+                selected: isOff,
+                onTap: _enabled
+                    ? () {
+                        setState(() {
+                          _beforeBedHours = 0;
+                          _beforeBedMinutes = 0;
+                        });
+                      }
+                    : null,
+              ),
+              _freqChip(
+                label: '15 ${_t('minute')}',
+                selected: is15m,
+                onTap: _enabled
+                    ? () {
+                        setState(() {
+                          _beforeBedHours = 0;
+                          _beforeBedMinutes = 15;
+                        });
+                      }
+                    : null,
+              ),
+              _freqChip(
+                label: '30 ${_t('minute')}',
+                selected: is30m,
+                onTap: _enabled
+                    ? () {
+                        setState(() {
+                          _beforeBedHours = 0;
+                          _beforeBedMinutes = 30;
+                        });
+                      }
+                    : null,
+              ),
+              _freqChip(
+                label: '1 ${_t('hour')}',
+                selected: is1h,
+                onTap: _enabled
+                    ? () {
+                        setState(() {
+                          _beforeBedHours = 1;
+                          _beforeBedMinutes = 0;
+                        });
+                      }
+                    : null,
+              ),
+              _freqChip(
+                label: customBeforeBedLabel,
+                selected: isCustomBeforeBed,
+                trailing: Icons.timer_outlined,
+                onTap: _enabled ? _showBeforeBedPicker : null,
               ),
             ],
           ),
@@ -789,6 +988,9 @@ class _NotificationScreenState extends State<NotificationScreen> {
               if (displayMsg == 'ถึงเวลาที่ควรดื่มน้ำ' ||
                   displayMsg == 'Time to drink water') {
                 displayMsg = _t('time_to_drink');
+              } else if (displayMsg ==
+                  'ใกล้ถึงเวลานอนแล้ว ดื่มน้ำให้ครบเป้าหมายนะ') {
+                displayMsg = _t('bedtime_msg');
               }
 
               return Padding(

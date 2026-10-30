@@ -1,15 +1,12 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import 'firebase_options.dart';
 
 import 'core/theme.dart';
-import 'core/utils.dart';
+import 'core/reminder_scheduler.dart';
 import 'screens/main_nav_screen.dart';
 
 final GlobalKey<ScaffoldMessengerState> messengerKey =
@@ -26,33 +23,7 @@ const AndroidNotificationChannel alertChannel = AndroidNotificationChannel(
   enableVibration: true,
 );
 
-// ฟังก์ชันคำนวณว่าเวลาปัจจุบันอยู่ในช่วงเวลาปิดเสียงหรือไม่
-bool isTimeInQuietRange(String? startStr, String? endStr) {
-  if (startStr == null || endStr == null) return false;
-  try {
-    final now = DateTime.now();
-    final currentMinutes = now.hour * 60 + now.minute;
-
-    final startParts = startStr.split(':');
-    final endParts = endStr.split(':');
-    final startMinutes =
-        int.parse(startParts[0]) * 60 + int.parse(startParts[1]);
-    final endMinutes = int.parse(endParts[0]) * 60 + int.parse(endParts[1]);
-
-    if (startMinutes == endMinutes) return false;
-
-    if (startMinutes < endMinutes) {
-      // อยู่ในวันเดียวกัน เช่น 09:00 ถึง 17:00
-      return currentMinutes >= startMinutes && currentMinutes < endMinutes;
-    } else {
-      // ข้ามเที่ยงคืน เช่น 22:00 ถึง 06:00
-      return currentMinutes >= startMinutes || currentMinutes < endMinutes;
-    }
-  } catch (e) {
-    debugPrint('⚠️ [Quiet Time Error] ไม่สามารถคำนวณเวลาได้: $e');
-    return false;
-  }
-}
+// (เช็กช่วงปิดเสียงย้ายไปอยู่ใน core/reminder_scheduler.dart แล้ว)
 
 Future<void> showSystemNotification({
   required String title,
@@ -96,6 +67,9 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // 🌟 ใช้เขตเวลาไทยสำหรับตั้งเวลาแจ้งเตือนล่วงหน้า
+  ReminderScheduler.initTimeZone();
 
   try {
     await Firebase.initializeApp(
@@ -141,188 +115,89 @@ class SmartCupApp extends StatefulWidget {
 }
 
 class _SmartCupAppState extends State<SmartCupApp> {
-  StreamSubscription<DatabaseEvent>? _triggerSubscription;
-
-  bool _isFirstEvent = true;
-  bool? _lastTriggerState;
-  DateTime? _lastAlertTime;
-  bool _isProcessing = false;
-
+  // 🌟 แจ้งเตือนดื่มน้ำ: ตั้งเวลาไว้ในเครื่องล่วงหน้า (ทำงานแม้ปิดแอป)
+  // แทนการรอ ESP32 ยิง /notification/trigger ซึ่งเด้งได้เฉพาะตอนเปิดแอปอยู่
   @override
   void initState() {
     super.initState();
+    // 🌟 ถึงเวลาแจ้งเตือนตอนเปิดแอปอยู่ → แสดง SnackBar ในแอปด้วย
+    ReminderScheduler.onReminderDue = _showReminderSnackBar;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _initTriggerListener();
+      ReminderScheduler.start();
     });
   }
 
-  void _initTriggerListener() {
-    if (!isFirebaseReady()) return;
+  void _showReminderSnackBar(ReminderKind kind) {
+    final bool isEn = ReminderScheduler.language == 'en';
+    final bool bedtime = kind == ReminderKind.bedtime;
 
-    try {
-      _triggerSubscription = smartCupRef('notification')
-          .child('trigger')
-          .onValue
-          .listen((event) async {
-            final isTriggered = event.snapshot.value == true;
-            debugPrint(
-              '📡 [SmartCup RTDB] ค่า trigger ปัจจุบัน = $isTriggered',
-            );
+    final String title = bedtime
+        ? (isEn ? 'Bedtime is coming up 🌙' : 'ใกล้ถึงเวลานอนแล้ว 🌙')
+        : (isEn ? 'Time to drink water! 💧' : 'ได้เวลาดื่มน้ำแล้ว! 💧');
+    final String subtitle = bedtime
+        ? (isEn
+              ? 'Finish your water goal before bed.'
+              : 'ดื่มน้ำให้ครบเป้าหมายก่อนนอนนะครับ')
+        : (isEn
+              ? 'Take a few sips to stay refreshed.'
+              : 'จิบน้ำสักนิดเพื่อความสดชื่นนะครับ');
 
-            // ข้ามรอบแรกเพื่อป้องกันแคชค้างส่งเสียงตอนเปิดแอป
-            if (_isFirstEvent) {
-              _isFirstEvent = false;
-              _lastTriggerState = isTriggered;
-              if (isTriggered) {
-                debugPrint('🧹 [SmartCup RTDB] เคลียร์ค่า trigger เก่าทิ้ง');
-                smartCupRef('notification').update({'trigger': false});
-              }
-              return;
-            }
-
-            final bool isChangedToTrue =
-                (_lastTriggerState == false && isTriggered == true);
-            _lastTriggerState = isTriggered;
-
-            if (!isChangedToTrue) return;
-
-            // Cooldown 15 วินาที
-            final now = DateTime.now();
-            if (_isProcessing ||
-                (_lastAlertTime != null &&
-                    now.difference(_lastAlertTime!).inSeconds < 15)) {
-              debugPrint(
-                '⏳ [SmartCup Alert] อยู่ในช่วง Cooldown ข้ามการแจ้งเตือน',
-              );
-              return;
-            }
-
-            _isProcessing = true;
-            _lastAlertTime = now;
-
-            try {
-              final settingsSnapshot = await smartCupRef('settings').get();
-              if (settingsSnapshot.exists && settingsSnapshot.value is Map) {
-                final settings = Map<dynamic, dynamic>.from(
-                  settingsSnapshot.value as Map,
-                );
-                final bool isNotificationEnabled =
-                    settings['notification_enabled'] != false;
-                final String? quietStart = settings['quiet_start']?.toString();
-                final String? quietEnd = settings['quiet_end']?.toString();
-
-                // 1. ตรวจสอบว่าเปิดการแจ้งเตือนหรือไม่
-                if (!isNotificationEnabled) {
-                  debugPrint('🔕 [SmartCup Alert] ผู้ใช้ปิดการแจ้งเตือนไว้');
-                  await smartCupRef('notification').update({'trigger': false});
-                  return;
-                }
-
-                // 2. ตรวจสอบว่าอยู่ในช่วงเวลาปิดเสียงหรือไม่
-                if (isTimeInQuietRange(quietStart, quietEnd)) {
-                  debugPrint(
-                    '🌙 [SmartCup Alert] อยู่ในช่วงเวลาปิดเสียง ($quietStart - $quietEnd)',
-                  );
-                  await smartCupRef('notification').update({'trigger': false});
-                  return;
-                }
-              }
-
-              debugPrint('🔔 [SmartCup Alert] ส่งการแจ้งเตือนดื่มน้ำ');
-
-              // ยิงแจ้งเตือนระดับ OS
-              await showSystemNotification(
-                title: 'SmartCup 💧',
-                body: 'ได้เวลาดื่มน้ำแล้วครับ เพื่อสุขภาพที่ดี!',
-              );
-
-              // 🌟 บันทึกประวัติลง Firebase เพื่อนำไปแสดงในหน้าประวัติแจ้งเตือน
-              final timeStr =
-                  '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
-              smartCupRef('notification_logs').push().set({
-                'time': timeStr,
-                'message': 'ถึงเวลาที่ควรดื่มน้ำ',
-                'timestamp': ServerValue.timestamp,
-              });
-
-              // แสดง SnackBar ดีไซน์ใหม่ภายในแอป
-              messengerKey.currentState?.showSnackBar(
-                SnackBar(
-                  elevation: 0,
-                  margin: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 16,
+    messengerKey.currentState?.hideCurrentSnackBar();
+    messengerKey.currentState?.showSnackBar(
+      SnackBar(
+        elevation: 0,
+        margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+        content: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Icon(
+                bedtime ? Icons.bedtime_rounded : Icons.water_drop_rounded,
+                color: Colors.white,
+                size: 24,
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
                   ),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 16,
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(fontSize: 13, color: Colors.white70),
                   ),
-                  content: Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.2),
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                        child: const Icon(
-                          Icons.water_drop_rounded,
-                          color: Colors.white,
-                          size: 24,
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      const Expanded(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'ได้เวลาดื่มน้ำแล้ว! 💧',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white,
-                              ),
-                            ),
-                            SizedBox(height: 2),
-                            Text(
-                              'จิบน้ำสักนิดเพื่อความสดชื่นนะครับ',
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: Colors.white70,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  backgroundColor: primaryDark,
-                  duration: const Duration(seconds: 4),
-                  behavior: SnackBarBehavior.floating,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                ),
-              );
-
-              // รีเซ็ตสถานะกลับเป็น false
-              await smartCupRef('notification').update({'trigger': false});
-            } catch (e) {
-              debugPrint('❌ [SmartCup Alert Error]: $e');
-            } finally {
-              _isProcessing = false;
-            }
-          });
-    } catch (e) {
-      debugPrint('❌ [SmartCup RTDB] Error: $e');
-    }
+                ],
+              ),
+            ),
+          ],
+        ),
+        backgroundColor: primaryDark,
+        duration: const Duration(seconds: 4),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      ),
+    );
   }
 
   @override
   void dispose() {
-    _triggerSubscription?.cancel();
+    ReminderScheduler.onReminderDue = null;
+    ReminderScheduler.stop();
     super.dispose();
   }
 

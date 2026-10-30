@@ -27,6 +27,7 @@ migrate_working_dir/
 **/doc/api/
 **/ios/Flutter/.last_build_id
 .dart_tool/
+.flutter-plugins
 .flutter-plugins-dependencies
 .pub-cache/
 .pub/
@@ -46,9 +47,32 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
-.env
-*.env
+
+# ─────────────────────────────────────────────
+# 🔒 ของลับ — ห้ามขึ้น GitHub
+# ─────────────────────────────────────────────
+# Gemini API key (ใช้กับ flutter run --dart-define-from-file=env.json)
 env.json
 .env
+*.env
+
+# Firebase Admin (สิทธิ์เต็มทุกอย่าง) ของสคริปต์ backend_ai
 serviceAccountKey.json
 **/serviceAccountKey.json
+
+# รหัส Firebase ของบอร์ด ESP32 (แยกจากไฟล์ .ino)
+secrets.h
+**/secrets.h
+
+# กุญแจเซ็นแอป Android (ถ้าทำ release build)
+*.jks
+*.keystore
+**/android/key.properties
+**/android/local.properties
+
+# ─────────────────────────────────────────────
+# Python (backend_ai)
+# ─────────────────────────────────────────────
+__pycache__/
+.venv/
+venv/

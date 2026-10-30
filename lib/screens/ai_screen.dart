@@ -8,6 +8,8 @@ import 'package:http/http.dart' as http;
 import '../core/theme.dart';
 import '../core/ui_kit.dart';
 import '../core/utils.dart';
+import '../main.dart'
+    show showSystemNotification; // 🌟 ดึงฟังก์ชันยิงแจ้งเตือนระดับ OS มาใช้งาน
 
 class AITip {
   final IconData icon;
@@ -29,22 +31,35 @@ class AIScreen extends StatefulWidget {
 }
 
 class _AIScreenState extends State<AIScreen> {
-  // อ่านคีย์จาก --dart-define เพื่อไม่ให้คีย์อยู่ในซอร์สโค้ดที่อัปโหลดขึ้น GitHub
-  // (รันในเครื่อง: flutter run --dart-define-from-file=env.json)
   final String geminiApiKey = const String.fromEnvironment('GEMINI_API_KEY');
 
   double _avgIntake = 0;
+  double _dailyTarget = 2400;
   int _percentTarget = 0;
   int _healthScore = 0;
   int _consistency = 0;
   bool _isLoading = true;
   bool _isAnalyzing = false;
-  String _selectedLanguage = 'th'; // 🌟 ตัวแปรภาษา
+  String _selectedLanguage = 'th';
+
+  // 🌟 ตัวแปรเก็บเวลานอน (เชื่อมตรงกับ settings/quiet_start)
+  // เวลานอน = เวลาเริ่มปิดเสียง (ค่าเริ่มต้นตรงกับหน้าแจ้งเตือน)
+  String _bedtimeStr = '22:00';
+  // 🌟 ตั้งค่าแจ้งเตือนจากหน้าแจ้งเตือน: แจ้งเตือน AI ต้องเคารพเหมือนแจ้งเตือนอื่น
+  bool _notificationEnabled = true;
+  String _quietEndStr = '06:00';
+  double _expectedIntakeNow = 0;
+  double _recommendedRatePerHour = 0;
+  int _minutesUntilBed = 0;
+
+  String _lastAlertSignature = '';
+  DateTime? _lastAutoAlertTime;
 
   List<AITip> _tips = [];
   StreamSubscription<DatabaseEvent>? _subscription;
+  StreamSubscription<DatabaseEvent>? _settingsSubscription;
+  Timer? _smartCheckTimer;
 
-  // 🌟 พจนานุกรมแปลภาษาหน้า AI
   final Map<String, Map<String, String>> _aiTexts = {
     'th': {
       'title': 'คำแนะนำจาก AI',
@@ -58,9 +73,15 @@ class _AIScreenState extends State<AIScreen> {
       'health_score': 'Health Score',
       'consistency': 'Consistency',
       'tips_for_you': 'คำแนะนำสำหรับคุณ',
-      'no_tips': 'กดปุ่ม "วิเคราะห์" เพื่อเริ่มรับคำแนะนำจาก AI ประจำวัน',
-      'success': 'AI วิเคราะห์ข้อมูลสำเร็จแล้ว',
+      'no_tips': 'กดปุ่ม "วิเคราะห์" เพื่อรับคำแนะนำจาก AI',
+      'success': 'AI วิเคราะห์และประเมินการแจ้งเตือนสำเร็จแล้ว',
       'error': 'เกิดข้อผิดพลาดในการวิเคราะห์',
+      'pacing_title': 'แผนการดื่ม 12 ชม. (06:00 - 18:00) & ก่อนนอน',
+      'bedtime_at': 'เวลานอนที่ตั้งไว้:',
+      'expected_now': 'เกณฑ์ที่ควรดื่มได้ตอนนี้:',
+      'rate_needed': 'อัตราเร่งก่อนเข้านอน:',
+      'on_track': 'อยู่ในเกณฑ์ดีเยี่ยม!',
+      'behind_schedule': 'ต่ำกว่าเกณฑ์ ควรเร่งดื่มน้ำ',
     },
     'en': {
       'title': 'AI Insights',
@@ -75,8 +96,14 @@ class _AIScreenState extends State<AIScreen> {
       'consistency': 'Consistency',
       'tips_for_you': 'Tips for You',
       'no_tips': 'Press "Analyze" to get your daily AI insights.',
-      'success': 'AI analysis completed successfully.',
+      'success': 'AI analysis and alert check completed.',
       'error': 'An error occurred during analysis.',
+      'pacing_title': '12-Hr Pacing (06:00 - 18:00) & Bedtime',
+      'bedtime_at': 'Target Bedtime:',
+      'expected_now': 'Expected by now:',
+      'rate_needed': 'Required pace before bed:',
+      'on_track': 'On Track!',
+      'behind_schedule': 'Behind schedule, speed up!',
     },
   };
 
@@ -88,6 +115,10 @@ class _AIScreenState extends State<AIScreen> {
   void initState() {
     super.initState();
     _listenFirebase();
+    _listenSettings(); // 🌟 ดึงค่า settings แยกโหนดแบบ Real-time 100%
+    _smartCheckTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _evaluateSmartPacingAndAutoAlert();
+    });
   }
 
   IconData _mapIcon(String? iconType) {
@@ -110,6 +141,286 @@ class _AIScreenState extends State<AIScreen> {
   String _getCurrentDateKey() {
     final now = DateTime.now();
     return "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
+  }
+
+  Map<String, dynamic> _calculate12HrAndBedtimeMetrics({
+    required double todayTotal,
+    required double dailyTarget,
+    required String bedtimeStr,
+  }) {
+    final now = DateTime.now();
+    final int currentMinutes = now.hour * 60 + now.minute;
+
+    const int start12Hr = 6 * 60; // 06:00
+    const int end12Hr = 18 * 60; // 18:00
+
+    double progress12Hr;
+    if (currentMinutes <= start12Hr) {
+      progress12Hr = 0.0;
+    } else if (currentMinutes >= end12Hr) {
+      progress12Hr = 1.0;
+    } else {
+      progress12Hr = (currentMinutes - start12Hr) / (end12Hr - start12Hr);
+    }
+
+    final double expectedByNow = (dailyTarget * progress12Hr).clamp(
+      0.0,
+      dailyTarget,
+    );
+    final double remainingMl = (dailyTarget - todayTotal).clamp(
+      0.0,
+      dailyTarget,
+    );
+
+    final TimeOfDay bedTOD = parseTOD(bedtimeStr);
+    int bedMinutes = bedTOD.hour * 60 + bedTOD.minute;
+    int minsUntilBed = bedMinutes - currentMinutes;
+
+    // 🌟 ป้องกันเวลาติดลบหรือเลยเวลานอน ให้คิดเวลาที่เหลืออย่างน้อย 1 ชั่วโมงเต็ม
+    if (minsUntilBed <= 0) {
+      minsUntilBed += 24 * 60;
+    }
+    if (minsUntilBed < 60) {
+      minsUntilBed = 60;
+    }
+
+    double hoursLeftBeforeBed = (minsUntilBed / 60.0).clamp(1.0, 12.0);
+    double requiredRatePerHr = remainingMl > 0
+        ? (remainingMl / hoursLeftBeforeBed)
+        : 0.0;
+
+    // 🌟 จำกัดเพดานสูงสุดไม่ให้เกิน 1,000 ml/ชม. เพื่อความสมจริงตอนพรีเซนต์
+    if (requiredRatePerHr > 1000) {
+      requiredRatePerHr = 1000.0;
+    }
+
+    return {
+      'expected_by_now': expectedByNow,
+      'remaining_ml': remainingMl,
+      'mins_until_bed': minsUntilBed,
+      'rate_per_hr': requiredRatePerHr,
+      'is_past_18': currentMinutes >= end12Hr,
+    };
+  }
+
+  // 🌟 ฟังค่า settings/quiet_start โดยตรงเพื่อให้เวลานอนตรงเป๊ะตลอดเวลา
+  void _listenSettings() {
+    if (!isFirebaseReady()) return;
+    try {
+      _settingsSubscription = smartCupRef('settings').onValue.listen((event) {
+        final data = event.snapshot.value;
+        if (data == null) return;
+        try {
+          final settingsMap = Map<dynamic, dynamic>.from(data as dynamic);
+          final quietStart = settingsMap['quiet_start']?.toString();
+          final quietEnd = settingsMap['quiet_end']?.toString();
+
+          // สวิตช์ "เปิดการแจ้งเตือน" และเวลาสิ้นสุดช่วงปิดเสียง
+          _notificationEnabled = settingsMap['notification_enabled'] != false;
+          if (quietEnd != null && quietEnd.isNotEmpty) {
+            _quietEndStr = quietEnd;
+          }
+
+          if (quietStart != null && quietStart.isNotEmpty && mounted) {
+            setState(() {
+              _bedtimeStr = quietStart;
+              final metrics = _calculate12HrAndBedtimeMetrics(
+                todayTotal: _avgIntake,
+                dailyTarget: _dailyTarget,
+                bedtimeStr: _bedtimeStr,
+              );
+              _expectedIntakeNow = metrics['expected_by_now'] as double;
+              _minutesUntilBed = metrics['mins_until_bed'] as int;
+              _recommendedRatePerHour = metrics['rate_per_hr'] as double;
+            });
+          }
+        } catch (_) {}
+      });
+    } catch (e) {
+      debugPrint('Settings listen error: $e');
+    }
+  }
+
+  List<AITip> _buildLiveDynamicTips(List<AITip> extraAiTips) {
+    final now = DateTime.now();
+    final String currentTime =
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    final bool isEn = _selectedLanguage == 'en';
+    final int remaining = (_dailyTarget - _avgIntake)
+        .clamp(0, _dailyTarget)
+        .toInt();
+
+    List<AITip> liveList = [];
+
+    if (_percentTarget >= 100) {
+      liveList.add(
+        AITip(
+          icon: Icons.emoji_events_outlined,
+          title: isEn ? "Goal Achieved!" : "ยอดเยี่ยม บรรลุเป้าหมายแล้ว!",
+          description: isEn
+              ? "You've reached your ${_dailyTarget.toInt()} ml target before bedtime ($_bedtimeStr)!"
+              : "คุณดื่มน้ำครบตามเป้าหมาย ${_dailyTarget.toInt()} ml ก่อนถึงเวลานอน ($_bedtimeStr น.) เรียบร้อยแล้ว!",
+        ),
+      );
+    } else {
+      liveList.add(
+        AITip(
+          icon: Icons.warning_amber_rounded,
+          title: isEn
+              ? "12-Hr Pacing (06:00 - 18:00)"
+              : "วิเคราะห์แผน 12 ชม. (06:00 - 18:00 น.)",
+          description: isEn
+              ? "By $currentTime, you should have drunk ${_expectedIntakeNow.toInt()} ml. You still need $remaining ml before bedtime at $_bedtimeStr."
+              : "ณ เวลา $currentTime น. ตามเกณฑ์ 12 ชม. คุณควรดื่มได้ ${_expectedIntakeNow.toInt()} ml (ยังขาดอีก $remaining ml ก่อนถึงเวลานอน $_bedtimeStr น.)",
+        ),
+      );
+      liveList.add(
+        AITip(
+          icon: Icons.wb_sunny_outlined,
+          title: isEn
+              ? "Bedtime Countdown Plan ($_bedtimeStr)"
+              : "แผนเร่งดื่มน้ำก่อนเข้านอน ($_bedtimeStr น.)",
+          description: isEn
+              ? "Sip ~${_recommendedRatePerHour.toInt()} ml per hour before $_bedtimeStr."
+              : "แนะนำให้เร่งจิบน้ำเฉลี่ยชั่วโมงละ ${_recommendedRatePerHour.toInt()} ml เพื่อให้ครบเป้าก่อนเวลานอน $_bedtimeStr น.",
+        ),
+      );
+    }
+
+    for (final tip in extraAiTips) {
+      if (liveList.length >= 3) break;
+      final bool isDuplicatePacing =
+          tip.title.contains('12') ||
+          tip.title.contains('06:00') ||
+          tip.title.contains('ก่อนเข้านอน') ||
+          tip.title.contains('ก่อนเวลานอน') ||
+          tip.title.contains('Bedtime');
+      if (!isDuplicatePacing) {
+        liveList.add(tip);
+      }
+    }
+
+    return liveList;
+  }
+
+  // 🌟 ฟังก์ชันส่งแจ้งเตือน: แยก 2 โหมด (ไม่ถึง 50% เตือนด่วน / เกิน 50% ชวนดื่มเชิงบวก)
+  Future<void> _generateAndSendAIAlert({
+    required double remainingMl,
+    required double expectedByNow,
+    required double ratePerHr,
+    required int minsUntilBed,
+    required bool isOverHalf,
+  }) async {
+    final now = DateTime.now();
+    final String todayKey = _getCurrentDateKey();
+    final String timeStr =
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    final bool isEn = _selectedLanguage == 'en';
+
+    String alertTitle;
+    String alertBody;
+
+    if (isOverHalf) {
+      alertTitle = isEn
+          ? '💧 Great job! Keep it up!'
+          : '💧 ทำได้เกินครึ่งทางแล้ว!';
+      alertBody = isEn
+          ? 'You have achieved over 50% of your daily goal! Just $remainingMl ml left before $_bedtimeStr. Let\'s grab some water!'
+          : 'ยอดเยี่ยมมาก! คุณดื่มน้ำเกินครึ่งทางแล้ว เหลืออีกแค่ ${remainingMl.toInt()} ml ก็จะครบเป้าก่อนนอน $_bedtimeStr น. มาจิบน้ำเพิ่มความสดชื่นกันคับ!';
+    } else {
+      alertTitle = isEn
+          ? '🤖 AI Smart Hydration Alert!'
+          : '🤖 AI แจ้งเตือนเร่งดื่มน้ำอัจฉริยะ!';
+      alertBody = isEn
+          ? 'It is past 18:00 and you have drunk less than 50% (${_avgIntake.toInt()}/${_dailyTarget.toInt()} ml). Please drink ~${ratePerHr.toInt()} ml/hr before $_bedtimeStr!'
+          : 'ขณะนี้เวลา 18:00 น. แล้ว แต่คุณดื่มน้ำยังไม่ถึงครึ่งของเป้าหมาย (${_avgIntake.toInt()}/${_dailyTarget.toInt()} ml) แนะนำให้เร่งจิบน้ำชม.ละ ${ratePerHr.toInt()} ml ก่อนนอนเวลา $_bedtimeStr น. ครับ!';
+    }
+
+    await showSystemNotification(title: alertTitle, body: alertBody);
+
+    await smartCupRef('notification_logs').push().set({
+      'date': todayKey,
+      'time': timeStr,
+      'message': alertBody,
+      'timestamp': ServerValue.timestamp,
+    });
+  }
+
+  // ตอนนี้อยู่ในช่วงปิดเสียงไหม (เวลานอน → เวลาตื่น, รองรับข้ามเที่ยงคืน)
+  bool _isInQuietTime(DateTime now) {
+    final start = parseTOD(_bedtimeStr);
+    final end = parseTOD(_quietEndStr);
+    final int s = start.hour * 60 + start.minute;
+    final int e = end.hour * 60 + end.minute;
+    if (s == e) return false;
+    final int cur = now.hour * 60 + now.minute;
+    if (s < e) return cur >= s && cur < e;
+    return cur >= s || cur < e;
+  }
+
+  // 🌟 ตรวจสอบเงื่อนไข 50% และเวลา 18:00 น.
+  Future<void> _evaluateSmartPacingAndAutoAlert() async {
+    if (!isFirebaseReady() || !mounted) return;
+
+    final metrics = _calculate12HrAndBedtimeMetrics(
+      todayTotal: _avgIntake,
+      dailyTarget: _dailyTarget,
+      bedtimeStr: _bedtimeStr,
+    );
+
+    final double expectedByNow = metrics['expected_by_now'] as double;
+    final double remainingMl = metrics['remaining_ml'] as double;
+    final int minsUntilBed = metrics['mins_until_bed'] as int;
+    final double ratePerHr = metrics['rate_per_hr'] as double;
+
+    setState(() {
+      _expectedIntakeNow = expectedByNow;
+      _minutesUntilBed = minsUntilBed;
+      _recommendedRatePerHour = ratePerHr;
+    });
+
+    if (remainingMl <= 0) return;
+
+    // 🌟 ปิดแจ้งเตือนไว้ หรืออยู่ในช่วงปิดเสียง → ไม่ส่งแจ้งเตือน AI
+    // (การ์ดวิเคราะห์ในหน้านี้ยังอัปเดตตามปกติ)
+    final now = DateTime.now();
+    if (!_notificationEnabled || _isInQuietTime(now)) return;
+
+    final int currentMinutes = now.hour * 60 + now.minute;
+    const int target18Hr = 18 * 60; // 18:00 น.
+
+    final double intakeRatio = _dailyTarget > 0
+        ? (_avgIntake / _dailyTarget)
+        : 0;
+    final bool isOverHalf = intakeRatio >= 0.50; // เกิน 50% หรือไม่
+
+    final bool isPast18 = currentMinutes >= target18Hr;
+
+    // ส่งแจ้งเตือนเมื่อเลย 18:00 น. (ข้อความปรับตามว่าดื่มเกิน 50% หรือยัง)
+    // แจ้งเตือน "ก่อนเวลานอน" ย้ายไปตั้งเวลาในมือถือแล้ว (core/reminder_scheduler.dart)
+    // จึงไม่ต้องเช็กซ้ำที่นี่ ไม่งั้นจะเด้งซ้ำ 2 ครั้ง
+    if (isPast18) {
+      final String todayKey = _getCurrentDateKey();
+      final String currentSignature =
+          '$todayKey-$_bedtimeStr-${isOverHalf ? 'over_half' : 'below_half'}';
+
+      final bool cooldownPassed =
+          _lastAutoAlertTime == null ||
+          now.difference(_lastAutoAlertTime!).inMinutes >= 30;
+
+      if (_lastAlertSignature != currentSignature || cooldownPassed) {
+        _lastAlertSignature = currentSignature;
+        _lastAutoAlertTime = now;
+
+        await _generateAndSendAIAlert(
+          remainingMl: remainingMl,
+          expectedByNow: expectedByNow,
+          ratePerHr: ratePerHr,
+          minsUntilBed: minsUntilBed,
+          isOverHalf: isOverHalf,
+        );
+      }
+    }
   }
 
   Map<String, dynamic> _getLatestDrinkDetails(Map<dynamic, dynamic> mapData) {
@@ -327,17 +638,29 @@ class _AIScreenState extends State<AIScreen> {
           }
         }
 
+        final metrics = _calculate12HrAndBedtimeMetrics(
+          todayTotal: todayTotal,
+          dailyTarget: dailyTarget,
+          bedtimeStr: _bedtimeStr,
+        );
+
         if (!mounted) return;
 
         setState(() {
           _selectedLanguage = lang;
+          _dailyTarget = dailyTarget;
           _avgIntake = todayTotal;
           _percentTarget = percentInt;
+          _expectedIntakeNow = metrics['expected_by_now'] as double;
+          _minutesUntilBed = metrics['mins_until_bed'] as int;
+          _recommendedRatePerHour = metrics['rate_per_hr'] as double;
           _healthScore = healthScore;
           _consistency = consistency;
           _tips = fetchedTips;
           _isLoading = false;
         });
+
+        _evaluateSmartPacingAndAutoAlert();
       });
     } catch (e) {
       debugPrint('AI Firebase error: $e');
@@ -351,73 +674,39 @@ class _AIScreenState extends State<AIScreen> {
     required int percentInt,
     required String currentTime,
     required int streakDays,
+    required String bedtimeStr,
+    required double expectedByNow,
+    required double ratePerHr,
   }) {
-    int healthScore = 50;
-    if (percentInt >= 100) {
-      healthScore = 95;
-    } else if (percentInt >= 70)
-      // ignore: curly_braces_in_flow_control_structures
-      healthScore = 80;
-    else if (percentInt >= 40)
-      // ignore: curly_braces_in_flow_control_structures
-      healthScore = 65;
-    else
-      // ignore: curly_braces_in_flow_control_structures
-      healthScore = 40;
-
+    int healthScore = percentInt >= 100 ? 95 : (percentInt >= 50 ? 75 : 45);
     int consistency = (streakDays * 20).clamp(20, 100);
 
-    List<Map<String, dynamic>> tips = [];
+    List<AITip> tips = [];
     bool isEn = _selectedLanguage == 'en';
+    final remaining = (dailyTarget - todayTotal).clamp(0, dailyTarget).toInt();
 
-    if (todayTotal <= 0) {
-      tips.add({
-        "icon_type": "sunny",
-        "title": isEn ? "Start Your Day" : "เริ่มต้นวันใหม่",
-        "description": isEn
-            ? "It's $currentTime and you haven't started drinking water yet. Have a glass to wake up your body!"
-            : "ขณะนี้เวลา $currentTime วันนี้ยังไม่ได้เริ่มดื่มน้ำ แนะนำจิบน้ำแก้วแรกเพื่อปลุกความสดชื่นกันครับ",
-      });
-      tips.add({
-        "icon_type": "coffee",
-        "title": isEn ? "Today's Goal" : "เป้าหมายวันนี้",
-        "description": isEn
-            ? "Your goal is ${dailyTarget.toInt()} ml. Try to sip 150-200 ml at a time."
-            : "เป้าหมายการดื่มน้ำของคุณคือ ${dailyTarget.toInt()} ml พยายามแบ่งจิบแก้วละ 150-200 ml ระหว่างวัน",
-      });
-    } else if (percentInt >= 100) {
-      tips.add({
-        "icon_type": "trophy",
-        "title": isEn ? "Goal Achieved!" : "ยอดเยี่ยม บรรลุเป้าหมายแล้ว!",
-        "description": isEn
-            ? "You've reached your ${dailyTarget.toInt()} ml target today. Keep it up!"
-            : "คุณดื่มน้ำครบตามเป้าหมาย ${dailyTarget.toInt()} ml ในวันนี้แล้ว รักษามาตรฐานที่ดีนี้ไว้",
-      });
-      tips.add({
-        "icon_type": "fire",
-        "title": isEn ? "Keep the Streak" : "สะสม Streak ต่อเนื่อง",
-        "description": isEn
-            ? "You're on a $streakDays day streak. Let's do it again tomorrow!"
-            : "ดื่มต่อเนื่องเป็นวันที่ $streakDays พรุ่งนี้มารักษาเป้าหมายกันต่อ",
-      });
+    if (percentInt >= 100) {
+      tips.add(
+        AITip(
+          icon: Icons.emoji_events_outlined,
+          title: isEn ? "Goal Achieved!" : "ยอดเยี่ยม บรรลุเป้าหมายแล้ว!",
+          description: isEn
+              ? "You've reached your ${dailyTarget.toInt()} ml target before bedtime ($bedtimeStr)!"
+              : "คุณดื่มน้ำครบตามเป้าหมาย ${dailyTarget.toInt()} ml ก่อนถึงเวลานอน ($bedtimeStr น.) เรียบร้อยแล้ว!",
+        ),
+      );
     } else {
-      final remaining = (dailyTarget - todayTotal)
-          .clamp(0, dailyTarget)
-          .toInt();
-      tips.add({
-        "icon_type": "sunny",
-        "title": isEn ? "Hydrate Your Body" : "เติมน้ำให้ร่างกาย",
-        "description": isEn
-            ? "It's $currentTime and you have $remaining ml left. Keep drinking steadily."
-            : "ขณะนี้เวลา $currentTime ยังขาดอีก $remaining ml ควรจิบน้ำเพิ่มอย่างต่อเนื่อง",
-      });
-      tips.add({
-        "icon_type": "coffee",
-        "title": isEn ? "Sip Throughout the Day" : "แบ่งจิบน้ำทีละแก้ว",
-        "description": isEn
-            ? "Try sipping 150-200 ml every 30-45 minutes for optimal absorption."
-            : "แนะนำจิบน้ำครั้งละ 150-200 ml ทุก 30-45 นาที เพื่อให้ร่างกายดูดซึมได้ดีที่สุด",
-      });
+      tips.add(
+        AITip(
+          icon: Icons.warning_amber_rounded,
+          title: isEn
+              ? "12-Hr Pacing (06:00 - 18:00)"
+              : "วิเคราะห์แผน 12 ชม. (06:00 - 18:00 น.)",
+          description: isEn
+              ? "By $currentTime, you should have drunk ${expectedByNow.toInt()} ml. You still need $remaining ml before bedtime at $bedtimeStr."
+              : "ณ เวลา $currentTime น. ตามเกณฑ์ 12 ชม. คุณควรดื่มได้ ${expectedByNow.toInt()} ml (ยังขาดอีก $remaining ml ก่อนถึงเวลานอน $bedtimeStr น.)",
+        ),
+      );
     }
 
     return {
@@ -426,7 +715,17 @@ class _AIScreenState extends State<AIScreen> {
       "percent_target": percentInt,
       "health_score": healthScore,
       "consistency": consistency,
-      "tips": tips,
+      "tips": tips
+          .map(
+            (e) => {
+              "icon_type": e.icon == Icons.emoji_events_outlined
+                  ? "trophy"
+                  : "alert",
+              "title": e.title,
+              "description": e.description,
+            },
+          )
+          .toList(),
     };
   }
 
@@ -461,11 +760,9 @@ class _AIScreenState extends State<AIScreen> {
       }
 
       final latestDrink = _getLatestDrinkDetails(data);
-      final currentDrink = latestDrink['type']?.toString() ?? 'น้ำเปล่า';
-      final lastDrinkDesc =
-          latestDrink['description']?.toString() ?? currentFormattedTime;
-      final double lastDrinkAmount =
-          double.tryParse('${latestDrink['amount']}') ?? 0.0;
+      latestDrink['type']?.toString() ?? 'น้ำเปล่า';
+      latestDrink['description']?.toString() ?? currentFormattedTime;
+      double.tryParse('${latestDrink['amount']}') ?? 0.0;
       final streakDays = int.tryParse('${data['streak_days'] ?? 0}') ?? 0;
 
       double dailyTarget = 2400.0;
@@ -475,32 +772,28 @@ class _AIScreenState extends State<AIScreen> {
             double.tryParse('${profile['daily_target'] ?? 2400}') ?? 2400.0;
       }
 
+      final metrics = _calculate12HrAndBedtimeMetrics(
+        todayTotal: todayTotal,
+        dailyTarget: dailyTarget,
+        bedtimeStr: _bedtimeStr,
+      );
+      final double expectedByNow = metrics['expected_by_now'] as double;
+      final double ratePerHr = metrics['rate_per_hr'] as double;
+
       final int percentInt = dailyTarget > 0
           ? ((todayTotal / dailyTarget) * 100).clamp(0, 100).toInt()
           : 0;
-      final int remainingMl = (dailyTarget - todayTotal)
-          .clamp(0, dailyTarget)
-          .round();
-
-      // 🌟 สั่งให้ AI ตอบกลับเป็นภาษาที่เลือก
-      final String aiLangStr = _selectedLanguage == 'en' ? 'ENGLISH' : 'THAI';
 
       final prompt =
           """
-คุณเป็น AI ผู้เชี่ยวชาญด้านสุขภาพและการดื่มน้ำ (Smart Cup AI)
+คุณเป็น AI อัจฉริยะด้านการวางแผนดื่มน้ำ (Smart Cup AI)
 ข้อมูลผู้ใช้จริง:
-- วันที่: $todayKey
-- เวลาปัจจุบัน: $currentFormattedTime
-- ปริมาณที่ดื่มวันนี้: ${todayTotal.toStringAsFixed(1)} ml (เป้าหมาย: ${dailyTarget.toInt()} ml)
-- ดื่มน้ำครั้งล่าสุดเมื่อ: $lastDrinkDesc (ประเภท: $currentDrink, ปริมาณ: ${lastDrinkAmount.toInt()} ml)
-- Streak: $streakDays วัน
+- วันที่: $todayKey เวลาปัจจุบัน: $currentFormattedTime น.
+- เวลานอนที่ผู้ใช้ตั้งไว้: $_bedtimeStr น.
+- ปริมาณที่ดื่มวันนี้: ${todayTotal.toInt()} ml จากเป้าหมาย ${dailyTarget.toInt()} ml (คิดเป็น $percentInt%)
+- หากดื่มไม่ถึง 50% และเวลาผ่าน 18:00 น. แล้ว ให้วางแผนเร่งดื่มน้ำให้ทันเวลานอน $_bedtimeStr น.
 
-คำสั่ง:
-1. แนะนำการดื่มน้ำให้กระชับ เหมาะกับช่วงเวลาปัจจุบัน ($currentFormattedTime)
-2. หากปริมาณที่ดื่มวันนี้เป็น 0 ml ให้อ้างอิงการดื่มล่าสุด ($lastDrinkDesc) แล้วแนะนำเริ่มต้นจิบน้ำแก้วแรกของวัน ห้ามระบุว่าดื่มไปแล้ว
-3. ห้ามแต่งตัวเลขเปอร์เซ็นต์ขึ้นมาเองในเนื้อหาเด็ดขาด
-4. LANGUAGE REQUIREMENT: You MUST generate your response in $aiLangStr language ONLY.
-5. ตอบเป็น JSON โครงสร้างนี้เท่านั้น:
+ตอบเป็น JSON โครงสร้างนี้เท่านั้น:
 {
   "health_score": <คะแนนสุขภาพ 0-100>,
   "consistency": <คะแนนความสม่ำเสมอ 0-100>,
@@ -508,14 +801,15 @@ class _AIScreenState extends State<AIScreen> {
     {
       "icon_type": "<sunny หรือ fire หรือ coffee หรือ alert>",
       "title": "<หัวข้อคำแนะนำ>",
-      "description": "<คำแนะนำสั้นๆ สอดคล้องกับเวลาปัจจุบัน>"
+      "description": "<คำแนะนำอ้างอิงเวลานอน $_bedtimeStr น.>"
     }
   ]
 }
 """;
 
       final url = Uri.parse(
-        'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$geminiApiKey',
+        // gemini-2.0-flash ถูกปิดแล้ว → ใช้รุ่นที่ Google แนะนำในข้อความ error (404)
+        'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent',
       );
 
       http.Response? response;
@@ -523,7 +817,11 @@ class _AIScreenState extends State<AIScreen> {
         try {
           response = await http.post(
             url,
-            headers: {'Content-Type': 'application/json'},
+            // ส่ง key ทาง header (รองรับทั้ง key แบบใหม่ "AQ." และแบบเก่า "AIza")
+            headers: {
+              'Content-Type': 'application/json',
+              'x-goog-api-key': geminiApiKey,
+            },
             body: jsonEncode({
               "contents": [
                 {
@@ -535,21 +833,26 @@ class _AIScreenState extends State<AIScreen> {
               "generationConfig": {"responseMimeType": "application/json"},
             }),
           );
-
-          if (response.statusCode == 200) {
-            break;
-          } else if (response.statusCode == 503) {
-            await Future.delayed(const Duration(seconds: 1));
-          } else {
-            break;
-          }
-        } catch (_) {
-          break;
+          if (response.statusCode == 200) break;
+        } catch (e) {
+          debugPrint('🤖 [Gemini] เชื่อมต่อไม่ได้: $e');
         }
       }
 
-      Map<String, dynamic> aiResult;
+      // 🔍 log ไว้เช็กว่าใช้ Gemini จริง หรือตกไปใช้การวิเคราะห์สำรองในเครื่อง
+      debugPrint('🤖 [Gemini] API key ยาว ${geminiApiKey.length} ตัวอักษร');
+      debugPrint('🤖 [Gemini] status = ${response?.statusCode}');
+      if (response != null && response.statusCode != 200) {
+        final body = response.body;
+        debugPrint(
+          '🤖 [Gemini] error = ${body.length > 500 ? body.substring(0, 500) : body}',
+        );
+        debugPrint(
+          '🤖 [Gemini] → ใช้การวิเคราะห์สำรอง (_generateLocalAnalysis)',
+        );
+      }
 
+      Map<String, dynamic> aiResult;
       if (response != null && response.statusCode == 200) {
         final resJson = jsonDecode(response.body);
         final rawText = resJson['candidates'][0]['content']['parts'][0]['text'];
@@ -557,34 +860,17 @@ class _AIScreenState extends State<AIScreen> {
 
         List<dynamic> parsedTips = generated['tips'] ?? [];
         List<Map<String, dynamic>> finalTips = [];
-
         bool isEn = _selectedLanguage == 'en';
 
-        if (todayTotal <= 0) {
-          finalTips.add({
-            "icon_type": "sunny",
-            "title": isEn ? "Start Your Day" : "เริ่มต้นวันใหม่",
-            "description": isEn
-                ? "It's $currentFormattedTime, start your first glass to wake up!"
-                : "ขณะนี้เวลา $currentFormattedTime วันนี้ยังไม่ได้เริ่มดื่มน้ำ แนะนำจิบน้ำแก้วแรกเพื่อปลุกความสดชื่น",
-          });
-        } else if (percentInt >= 100) {
-          finalTips.add({
-            "icon_type": "trophy",
-            "title": isEn ? "Goal Achieved!" : "ยอดเยี่ยม บรรลุเป้าหมายแล้ว!",
-            "description": isEn
-                ? "You drank ${dailyTarget.toInt()} ml today. Great job!"
-                : "คุณดื่มน้ำครบตามเป้าหมาย ${dailyTarget.toInt()} ml ในวันนี้แล้ว รักษามาตรฐานที่ดีนี้ไว้",
-          });
-        } else {
-          finalTips.add({
-            "icon_type": "sunny",
-            "title": isEn ? "Hydrate Now" : "เติมน้ำให้ร่างกาย",
-            "description": isEn
-                ? "It's $currentFormattedTime, you need $remainingMl ml more. Keep it up!"
-                : "ขณะนี้เวลา $currentFormattedTime ยังขาดอีก $remainingMl ml ควรจิบน้ำเพิ่มอย่างต่อเนื่อง",
-          });
-        }
+        finalTips.add({
+          "icon_type": "alert",
+          "title": isEn
+              ? "Bedtime Goal ($_bedtimeStr)"
+              : "เป้าหมายก่อนนอน ($_bedtimeStr น.)",
+          "description": isEn
+              ? "You've drunk ${todayTotal.toInt()} ml. Keep pacing before bedtime at $_bedtimeStr."
+              : "คุณดื่มไปแล้ว ${todayTotal.toInt()} ml ควบคุมอัตราการดื่มให้ทันก่อนนอนเวลา $_bedtimeStr น.",
+        });
 
         for (var tip in parsedTips) {
           if (finalTips.length >= 3) break;
@@ -608,6 +894,9 @@ class _AIScreenState extends State<AIScreen> {
           percentInt: percentInt,
           currentTime: currentFormattedTime,
           streakDays: streakDays,
+          bedtimeStr: _bedtimeStr,
+          expectedByNow: expectedByNow,
+          ratePerHr: ratePerHr,
         );
       }
 
@@ -618,11 +907,7 @@ class _AIScreenState extends State<AIScreen> {
             .showSnackBar(SnackBar(content: Text(_t('success'))));
       }
     } catch (e) {
-      debugPrint('Error analyzing AI: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('${_t('error')}: $e')));
-      }
+      debugPrint('AI Error: $e');
     } finally {
       if (mounted) setState(() => _isAnalyzing = false);
     }
@@ -630,7 +915,9 @@ class _AIScreenState extends State<AIScreen> {
 
   @override
   void dispose() {
+    _smartCheckTimer?.cancel();
     _subscription?.cancel();
+    _settingsSubscription?.cancel();
     super.dispose();
   }
 
@@ -642,6 +929,8 @@ class _AIScreenState extends State<AIScreen> {
         body: Center(child: CircularProgressIndicator(color: oceanBlue)),
       );
     }
+
+    final List<AITip> displayTips = _buildLiveDynamicTips(_tips);
 
     return Scaffold(
       backgroundColor: Colors.transparent,
@@ -658,28 +947,126 @@ class _AIScreenState extends State<AIScreen> {
                   const SizedBox(height: 24),
                   _buildAnalysisCard(),
                   const SizedBox(height: 16),
+                  _buildSmartPacingCard(),
+                  const SizedBox(height: 16),
                   _buildScoreCards(),
                   const SizedBox(height: 28),
                   SectionTitle(_t('tips_for_you')),
                   const SizedBox(height: 14),
-                  if (_tips.isEmpty)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 30),
-                      child: Center(
-                        child: Text(
-                          _t('no_tips'),
-                          style: const TextStyle(color: textGrey, fontSize: 14),
-                        ),
-                      ),
-                    )
-                  else
-                    ..._tips.map(_buildTipCard),
+                  ...displayTips.map(_buildTipCard),
                   const SizedBox(height: 24),
                 ],
               ),
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildSmartPacingCard() {
+    final bool isOnTrack =
+        _avgIntake >= _expectedIntakeNow || _percentTarget >= 100;
+    final int hrsLeft = _minutesUntilBed ~/ 60;
+    final int minsLeft = _minutesUntilBed % 60;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: glassDecoration(radius: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              GradientIconChip(
+                icon: Icons.schedule_rounded,
+                color: isOnTrack ? accentGreen : coral,
+                size: 44,
+                iconSize: 22,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _t('pacing_title'),
+                      style: const TextStyle(
+                        color: primaryDark,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 15,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      isOnTrack ? _t('on_track') : _t('behind_schedule'),
+                      style: TextStyle(
+                        color: isOnTrack ? accentGreen : coral,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                _t('expected_now'),
+                style: const TextStyle(color: textGrey, fontSize: 13),
+              ),
+              Text(
+                '${_expectedIntakeNow.toInt()} ml',
+                style: const TextStyle(
+                  color: primaryDark,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 14,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                _t('bedtime_at'),
+                style: const TextStyle(color: textGrey, fontSize: 13),
+              ),
+              Text(
+                '$_bedtimeStr (${hrsLeft}h ${minsLeft}m)',
+                style: const TextStyle(
+                  color: primaryDark,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 14,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                _t('rate_needed'),
+                style: const TextStyle(color: textGrey, fontSize: 13),
+              ),
+              Text(
+                '${_recommendedRatePerHour.toInt()} ml / hr',
+                style: const TextStyle(
+                  color: oceanBlue,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 14,
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }

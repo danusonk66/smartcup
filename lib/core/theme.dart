@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 // คงชื่อตัวแปรเดิมไว้ทั้งหมดเพื่อไม่ให้ไฟล์อื่นในโปรเจกต์เกิด Error (ปรับเฉพาะค่าสี)
 const Color primaryDark = Color(0xFF0B2F45); // น้ำทะเลลึก
@@ -24,11 +25,15 @@ ThemeData smartCupTheme() {
     surface: Colors.white,
   );
 
+  // 👇👇👇 เปลี่ยนชื่อฟอนต์แค่บรรทัดเดียวตรงนี้ได้เลยครับ! 👇👇👇
+  final String? customFontFamily = GoogleFonts.ibmPlexSansThai().fontFamily;
+  // 👆👆👆 (เช่น เปลี่ยน .prompt() เป็น .kanit() หรือ .mali()) 👆👆👆
+
   return ThemeData(
     useMaterial3: true,
     scaffoldBackgroundColor: bgLight,
     colorScheme: scheme,
-    // ไม่ล็อกฟอนต์ 'Arial' เพราะไม่รองรับภาษาไทย ให้ระบบเลือกฟอนต์ไทยที่เหมาะสมเอง
+    fontFamily: customFontFamily, // 🌟 ใช้ตัวนี้ตัวเดียว ฟอนต์เปลี่ยนทั้งแอปโดยไม่ติด Error
     appBarTheme: const AppBarTheme(
       backgroundColor: Colors.transparent,
       elevation: 0,
@@ -49,6 +54,7 @@ ThemeData smartCupTheme() {
       }),
       labelTextStyle: WidgetStateProperty.resolveWith((states) {
         return TextStyle(
+          fontFamily: customFontFamily,
           fontSize: 12,
           fontWeight: states.contains(WidgetState.selected)
               ? FontWeight.w700
@@ -66,7 +72,10 @@ ThemeData smartCupTheme() {
     snackBarTheme: SnackBarThemeData(
       behavior: SnackBarBehavior.floating,
       backgroundColor: primaryDark,
-      contentTextStyle: const TextStyle(color: Colors.white),
+      contentTextStyle: TextStyle(
+        fontFamily: customFontFamily,
+        color: Colors.white,
+      ),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
     ),
   );

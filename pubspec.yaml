@@ -26,6 +26,8 @@ dependencies:
   
   # 🌟 เพิ่มแพ็กเกจสำหรับเลือกรูปภาพจากเครื่อง
   image_picker: ^1.0.7
+  google_fonts: ^9.0.0
+  timezone: ^0.11.2
 
 dev_dependencies:
   flutter_test:
