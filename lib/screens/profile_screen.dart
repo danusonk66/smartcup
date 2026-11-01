@@ -32,11 +32,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   // 🌟 ตัวแปรสำหรับตั้งค่าภาชนะ/ขวดน้ำ (ค่าเริ่มต้นคือ แก้ว SmartCup)
   String _cupType = 'smartcup';
-  double _cupWeight = 200; // น้ำหนักแก้วมาตรฐาน SmartCup (กรัม)
+  double _cupWeight =
+      396; // น้ำหนักแก้วประจำ SmartCup (กรัม) ให้ตรงกับ _cupOptions
 
   // ค่าภาชนะที่บันทึกอยู่ใน Firebase ล่าสุด (ใช้เช็คว่ามีการเปลี่ยนที่ยังไม่ได้บันทึกไหม)
   String _savedCupType = 'smartcup';
-  double _savedCupWeight = 200;
+  double _savedCupWeight = 396;
   bool _savingCup = false;
 
   double get _pendingCupWeight =>
@@ -57,15 +58,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   // 🌟 รายการประเภทแก้ว/ขวดน้ำและน้ำหนักมาตรฐาน (กรัม)
   final List<Map<String, dynamic>> _cupOptions = [
-    {'key': 'smartcup', 'weight': 200.0, 'icon': Icons.auto_awesome_rounded},
+    {'key': 'smartcup', 'weight': 396.0, 'icon': Icons.auto_awesome_rounded},
+    // ขวดน้ำพลาสติก 500-600 ml (ขวดเปล่าหนัก 18 g)
     {
       'key': 'plastic_bottle',
-      'weight': 20.0,
+      'weight': 18.0,
       'icon': Icons.local_drink_rounded,
     },
-    {'key': 'cafe_cup', 'weight': 30.0, 'icon': Icons.takeout_dining_rounded},
-    {'key': 'ceramic_mug', 'weight': 250.0, 'icon': Icons.coffee_rounded},
-    {'key': 'tumbler', 'weight': 350.0, 'icon': Icons.ac_unit_rounded},
+    // ขวดน้ำพลาสติก 1.5 ลิตร (ขวดเปล่าหนัก 34 g)
+    {
+      'key': 'plastic_bottle_1500',
+      'weight': 34.0,
+      'icon': Icons.local_drink_rounded,
+    },
+    // แก้วพลาสติก / คาเฟ่ (หนัก 18 g)
+    {'key': 'cafe_cup', 'weight': 18.0, 'icon': Icons.takeout_dining_rounded},
     {'key': 'custom', 'weight': 0.0, 'icon': Icons.scale_rounded},
   ];
 
@@ -81,10 +88,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
       'cup_section_title': 'เลือกแก้วหรือขวดน้ำที่ใช้',
       'cup_section_subtitle': 'ระบบจะหักน้ำหนักภาชนะออกให้อัตโนมัติขณะชั่งน้ำ',
       'cup_smartcup': 'แก้วประจำ SmartCup (แนะนำ)',
-      'cup_plastic_bottle': 'ขวดน้ำพลาสติกทั่วไป',
+      'cup_plastic_bottle': 'ขวดน้ำพลาสติก 500–600 ml',
+      'cup_plastic_bottle_1500': 'ขวดน้ำพลาสติก 1.5 ลิตร',
       'cup_cafe_cup': 'แก้วพลาสติก / คาเฟ่',
-      'cup_ceramic_mug': 'แก้วเซรามิก / แก้วกระเบื้อง',
-      'cup_tumbler': 'แก้วเก็บความเย็น / สแตนเลส',
       'cup_custom': 'ภาชนะอื่นๆ (ระบุน้ำหนักเอง)',
       'cup_weight_label': 'น้ำหนักภาชนะเปล่า (กรัม)',
       'personal_info': 'ข้อมูลส่วนตัว',
@@ -123,10 +129,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
       'cup_section_subtitle':
           'Container weight will be automatically deducted when weighing',
       'cup_smartcup': 'Official SmartCup (Default)',
-      'cup_plastic_bottle': 'Plastic Water Bottle',
+      'cup_plastic_bottle': 'Plastic Bottle 500–600 ml',
+      'cup_plastic_bottle_1500': 'Plastic Bottle 1.5 L',
       'cup_cafe_cup': 'Plastic / Cafe Cup',
-      'cup_ceramic_mug': 'Ceramic Mug',
-      'cup_tumbler': 'Insulated Tumbler / Flask',
       'cup_custom': 'Other Container (Custom Weight)',
       'cup_weight_label': 'Empty container weight (grams)',
       'personal_info': 'Personal Information',

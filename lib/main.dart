@@ -1,11 +1,15 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:workmanager/workmanager.dart';
 
 import 'firebase_options.dart';
 
 import 'core/theme.dart';
+import 'core/ai_reminder.dart';
+import 'core/battery_watch.dart';
 import 'core/reminder_scheduler.dart';
 import 'screens/main_nav_screen.dart';
 
@@ -99,6 +103,13 @@ Future<void> main() async {
       sound: true,
     );
     await FirebaseMessaging.instance.subscribeToTopic('smartcup');
+
+    // 🤖 งานเบื้องหลังสำหรับแจ้งเตือนจาก AI (12:00 / 18:00 / ก่อนนอน)
+    if (!kIsWeb) {
+      await Workmanager().initialize(aiReminderDispatcher);
+      // 🔋 เช็กแบตแก้วเบื้องหลังทุก 15 นาที
+      await BatteryWatch.register();
+    }
     debugPrint('✅ [System] ระบบแจ้งเตือนพร้อมทำงาน');
   } catch (e) {
     debugPrint('❌ [System] เกิดข้อผิดพลาดตั้งค่าเริ่มต้น: $e');
@@ -122,6 +133,15 @@ class _SmartCupAppState extends State<SmartCupApp> {
     super.initState();
     // 🌟 ถึงเวลาแจ้งเตือนตอนเปิดแอปอยู่ → แสดง SnackBar ในแอปด้วย
     ReminderScheduler.onReminderDue = _showReminderSnackBar;
+    // 🤖 แจ้งเตือน AI เด้งตอนเปิดแอปอยู่ → SnackBar ข้อความเดียวกับที่ AI เขียน
+    // (แจ้งเตือนแบตใกล้หมดใช้ช่องทางเดียวกัน แต่แสดงไอคอนแบต)
+    ReminderScheduler.onAiAlert = (title, body) => _showSnack(
+      icon: (title.contains('🔋') || title.contains('🪫'))
+          ? Icons.battery_alert_rounded
+          : Icons.auto_awesome_rounded,
+      title: title,
+      subtitle: body,
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ReminderScheduler.start();
     });
@@ -142,6 +162,18 @@ class _SmartCupAppState extends State<SmartCupApp> {
               ? 'Take a few sips to stay refreshed.'
               : 'จิบน้ำสักนิดเพื่อความสดชื่นนะครับ');
 
+    _showSnack(
+      icon: bedtime ? Icons.bedtime_rounded : Icons.water_drop_rounded,
+      title: title,
+      subtitle: subtitle,
+    );
+  }
+
+  void _showSnack({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+  }) {
     messengerKey.currentState?.hideCurrentSnackBar();
     messengerKey.currentState?.showSnackBar(
       SnackBar(
@@ -156,11 +188,7 @@ class _SmartCupAppState extends State<SmartCupApp> {
                 color: Colors.white.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(14),
               ),
-              child: Icon(
-                bedtime ? Icons.bedtime_rounded : Icons.water_drop_rounded,
-                color: Colors.white,
-                size: 24,
-              ),
+              child: Icon(icon, color: Colors.white, size: 24),
             ),
             const SizedBox(width: 16),
             Expanded(
@@ -187,7 +215,7 @@ class _SmartCupAppState extends State<SmartCupApp> {
           ],
         ),
         backgroundColor: primaryDark,
-        duration: const Duration(seconds: 4),
+        duration: const Duration(seconds: 6),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       ),
@@ -197,6 +225,7 @@ class _SmartCupAppState extends State<SmartCupApp> {
   @override
   void dispose() {
     ReminderScheduler.onReminderDue = null;
+    ReminderScheduler.onAiAlert = null;
     ReminderScheduler.stop();
     super.dispose();
   }

@@ -8,6 +8,8 @@ import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 
 import '../main.dart' show flutterLocalNotificationsPlugin;
+import 'ai_reminder.dart';
+import 'battery_watch.dart';
 import 'utils.dart';
 
 /// ชนิดของแจ้งเตือน (ใช้เลือกข้อความ SnackBar ในแอป)
@@ -16,7 +18,9 @@ enum ReminderKind { drink, bedtime }
 /// 🌟 ตั้งเวลาแจ้งเตือนไว้ในมือถือล่วงหน้า (ทำงานแม้ปิดแอป)
 ///
 /// 1) แจ้งเตือนดื่มน้ำตามความถี่: นับจากเวลาดื่มล่าสุด ตั้งล่วงหน้า 24 รอบ ข้ามช่วงปิดเสียง
-/// 2) แจ้งเตือนก่อนเวลานอน: ทุกวัน ณ (เวลาเริ่มปิดเสียง - เวลาที่ตั้งไว้)
+///    และข้ามรอบที่ห่างจากแจ้งเตือน AI ไม่ถึง 15 นาที (ไม่ให้เด้งซ้อนกัน)
+/// 2) แจ้งเตือนจาก AI 12:00 / 18:00 / ก่อนเวลานอน → ตั้งงานเบื้องหลังผ่าน [AiReminder]
+///    (แจ้งเตือนก่อนนอนแบบเดิมรวมเข้ากับ AI แล้ว)
 ///
 /// - อ่านการตั้งค่าจาก /SmartCup/settings และเวลาดื่มล่าสุดจาก /SmartCup/last_drink_timestamp
 /// - ทุกครั้งที่ตั้งเวลาใหม่ จะบันทึกแจ้งเตือนที่เด้งไปแล้วลง notification_logs
@@ -25,26 +29,32 @@ class ReminderScheduler {
   ReminderScheduler._();
 
   static const int _drinkBaseId = 1000; // id 1000-1023: แจ้งเตือนดื่มน้ำ
-  static const int _bedtimeId = 1100; //   id 1100: แจ้งเตือนก่อนนอน
+  static const int _bedtimeId =
+      1100; //   id 1100: แจ้งเตือนก่อนนอนแบบเดิม (ยกเลิกทิ้ง)
   static const int _maxReminders = 24;
   static const int _defaultIntervalMinutes = 120;
   static const int _minIntervalMinutes =
       1; // ให้ตั้ง 1 นาทีได้ (ไว้ทดสอบ/สาธิต)
-  static const int _defaultBeforeBedMinutes =
-      30; // ตรงกับค่าเริ่มต้นในหน้าแจ้งเตือน
   static const String _defaultBedtime =
       '22:00'; // ตรงกับค่าเริ่มต้นในหน้าแจ้งเตือน
 
   static const String drinkLogMessage = 'ถึงเวลาที่ควรดื่มน้ำ';
-  static const String bedtimeLogMessage =
-      'ใกล้ถึงเวลานอนแล้ว ดื่มน้ำให้ครบเป้าหมายนะ';
 
   /// ให้ main.dart ตั้งค่าไว้ เพื่อแสดง SnackBar เมื่อถึงเวลาแจ้งเตือนขณะเปิดแอป
   static void Function(ReminderKind kind)? onReminderDue;
 
+  /// แจ้งเตือนจาก AI เด้งขณะเปิดแอป → แสดง SnackBar ข้อความเดียวกัน
+  static void Function(String title, String body)? onAiAlert;
+
+  /// ไม่ตั้งแจ้งเตือนตามความถี่ใกล้แจ้งเตือน AI เกินกี่นาที
+  static const int _aiGapMinutes = 15;
+
   static StreamSubscription<DatabaseEvent>? _settingsSub;
   static StreamSubscription<DatabaseEvent>? _drinkSub;
   static StreamSubscription<DatabaseEvent>? _langSub;
+  static StreamSubscription<DatabaseEvent>? _aiAlertSub;
+  static StreamSubscription<DatabaseEvent>? _batterySub;
+  static bool _checkingBattery = false;
   static Timer? _debounce;
   static Timer? _inAppTimer;
 
@@ -58,7 +68,6 @@ class ReminderScheduler {
 
   // เวลาที่ตั้งไว้รอบล่าสุด (ใช้ตั้ง Timer สำหรับ SnackBar ในแอป)
   static List<DateTime> _drinkTimes = [];
-  static String? _bedtimeAlertHHmm;
 
   /// เรียกครั้งเดียวใน main() ก่อน runApp
   static void initTimeZone() {
@@ -86,12 +95,38 @@ class ReminderScheduler {
       _lang = event.snapshot.value?.toString() ?? 'th';
       _scheduleSoon();
     });
+
+    // 🔋 เปิดแอปอยู่: เช็กแบตแก้วทันทีที่ % เปลี่ยน → แจ้งเตือน + SnackBar
+    _batterySub = smartCupRef('battery_percent').onValue.listen((_) async {
+      if (_checkingBattery) return;
+      _checkingBattery = true;
+      try {
+        final msg = await BatteryWatch.check();
+        if (msg != null) onAiAlert?.call(msg['title']!, msg['body']!);
+      } catch (e) {
+        debugPrint('❌ [Battery] เช็กแบตผิดพลาด: $e');
+      } finally {
+        _checkingBattery = false;
+      }
+    });
+
+    // แจ้งเตือน AI ที่เพิ่งเด้ง (ภายใน 2 นาที) → SnackBar ในแอป
+    _aiAlertSub = smartCupRef('ai_alert').onValue.listen((event) {
+      final v = event.snapshot.value;
+      if (v is! Map) return;
+      final int ts = int.tryParse('${v['timestamp']}') ?? 0;
+      final int age = DateTime.now().millisecondsSinceEpoch - ts;
+      if (age < 0 || age > 2 * 60 * 1000) return;
+      onAiAlert?.call('${v['title'] ?? ''}', '${v['body'] ?? ''}');
+    });
   }
 
   static void stop() {
     _settingsSub?.cancel();
     _drinkSub?.cancel();
     _langSub?.cancel();
+    _aiAlertSub?.cancel();
+    _batterySub?.cancel();
     _debounce?.cancel();
     _inAppTimer?.cancel();
     _started = false;
@@ -134,14 +169,6 @@ class ReminderScheduler {
       '${t.year}-${_two(t.month)}-${_two(t.day)}';
   static String _hhmm(DateTime t) => '${_two(t.hour)}:${_two(t.minute)}';
 
-  /// เวลาเกิดครั้งถัดไปของ HH:mm (วันนี้ ถ้ายังไม่ถึง ไม่งั้นพรุ่งนี้)
-  static DateTime _nextOccurrence(String hhmm, DateTime now) {
-    final mins = _minutesOf(hhmm);
-    DateTime t = DateTime(now.year, now.month, now.day, mins ~/ 60, mins % 60);
-    if (!t.isAfter(now)) t = t.add(const Duration(days: 1));
-    return t;
-  }
-
   /// เครื่องอนุญาตแจ้งเตือนแบบตรงเวลาไหม (ต้องมีสิทธิ์ exact alarm ใน AndroidManifest)
   static Future<AndroidScheduleMode> _scheduleMode() async {
     final android = flutterLocalNotificationsPlugin
@@ -173,34 +200,6 @@ class ReminderScheduler {
         await _pushLog(ms, drinkLogMessage);
       }
     }
-
-    // แจ้งเตือนก่อนนอน (ทำซ้ำทุกวัน บันทึกเฉพาะครั้งของวันนี้ที่ผ่านไปแล้ว)
-    final bedSnap = await smartCupRef('bedtime_reminder').get();
-    if (bedSnap.value is Map) {
-      final bed = Map<dynamic, dynamic>.from(bedSnap.value as Map);
-      final String? hhmm = bed['time']?.toString();
-      final int since = int.tryParse('${bed['since']}') ?? nowMs;
-      final String? lastLogged = bed['last_logged']?.toString();
-      if (hhmm != null && _minutesOf(hhmm) >= 0) {
-        final now = DateTime.now();
-        final mins = _minutesOf(hhmm);
-        final today = DateTime(
-          now.year,
-          now.month,
-          now.day,
-          mins ~/ 60,
-          mins % 60,
-        );
-        final int todayMs = today.millisecondsSinceEpoch;
-        if (todayMs <= nowMs &&
-            todayMs >= since &&
-            lastLogged != _dateKey(today)) {
-          await _pushLog(todayMs, bedtimeLogMessage);
-          await smartCupRef('bedtime_reminder')
-              .update({'last_logged': _dateKey(today)});
-        }
-      }
-    }
   }
 
   static Future<void> _pushLog(int ms, String message) {
@@ -222,14 +221,21 @@ class ReminderScheduler {
     for (int i = 0; i < _maxReminders; i++) {
       await flutterLocalNotificationsPlugin.cancel(id: _drinkBaseId + i);
     }
+    // แจ้งเตือนก่อนนอนแบบเดิม → รวมเข้ากับแจ้งเตือน AI แล้ว ยกเลิกของเก่าทิ้ง
     await flutterLocalNotificationsPlugin.cancel(id: _bedtimeId);
+    await smartCupRef('bedtime_reminder').remove();
     _drinkTimes = [];
-    _bedtimeAlertHHmm = null;
+
+    // 🤖 แจ้งเตือน AI (12:00 / 18:00 / ก่อนนอน) — ยกเลิกเองถ้าปิดแจ้งเตือน
+    try {
+      await AiReminder.scheduleAll(_settings);
+    } catch (e) {
+      debugPrint('❌ [AI Reminder] ตั้งเวลาไม่สำเร็จ: $e');
+    }
 
     final bool enabled = _settings['notification_enabled'] != false;
     if (!enabled) {
       await smartCupRef('notification_schedule').set([]);
-      await smartCupRef('bedtime_reminder').remove();
       _armInAppTimer();
       debugPrint('🔕 [Reminder] ปิดการแจ้งเตือน');
       return;
@@ -270,10 +276,25 @@ class ReminderScheduler {
       next = next.add(step);
     }
 
+    // เวลาแจ้งเตือน AI (นาทีของวัน) ไว้เช็กไม่ให้เด้งซ้อนกัน
+    final List<int> aiMinutes = AiReminder.slotTimes(_settings).values
+        .whereType<String>()
+        .map(_minutesOf)
+        .where((m) => m >= 0)
+        .toList();
+    bool nearAi(DateTime t) {
+      final cur = t.hour * 60 + t.minute;
+      for (final m in aiMinutes) {
+        final diff = (cur - m).abs();
+        if (diff < _aiGapMinutes || 1440 - diff < _aiGapMinutes) return true;
+      }
+      return false;
+    }
+
     final DateTime limit = now.add(const Duration(hours: 24));
     int slot = 0;
     while (slot < _maxReminders && next.isBefore(limit)) {
-      if (!_inQuietTime(next, quietStart, quietEnd)) {
+      if (!_inQuietTime(next, quietStart, quietEnd) && !nearAi(next)) {
         await flutterLocalNotificationsPlugin.zonedSchedule(
           id: _drinkBaseId + slot,
           title: 'SmartCup 💧',
@@ -292,47 +313,9 @@ class ReminderScheduler {
     await smartCupRef('notification_schedule')
         .set(_drinkTimes.map((t) => t.millisecondsSinceEpoch).toList());
 
-    // ---------- 2) แจ้งเตือนก่อนเวลานอน (ทุกวัน) ----------
-    // เวลานอน = เวลาเริ่มปิดเสียง (หน้า AI ใช้ค่าเดียวกัน)
-    int beforeBed =
-        int.tryParse('${_settings['before_bed_total_minutes']}') ?? -1;
-    if (beforeBed < 0) {
-      final h = int.tryParse('${_settings['before_bed_hours']}');
-      final m = int.tryParse('${_settings['before_bed_minutes']}');
-      beforeBed = (h == null && m == null)
-          ? _defaultBeforeBedMinutes
-          : (h ?? 0) * 60 + (m ?? 0);
-    }
-
-    final int bedMins = _minutesOf(quietStart);
-    if (beforeBed > 0 && bedMins >= 0) {
-      final int alertMins = ((bedMins - beforeBed) % 1440 + 1440) % 1440;
-      final String alertHHmm =
-          '${_two(alertMins ~/ 60)}:${_two(alertMins % 60)}';
-      final DateTime alertAt = _nextOccurrence(alertHHmm, now);
-
-      await flutterLocalNotificationsPlugin.zonedSchedule(
-        id: _bedtimeId,
-        title: 'SmartCup 🌙',
-        body: isEn
-            ? 'Bedtime is coming up at $quietStart. Finish your water goal!'
-            : 'อีก $beforeBed นาทีจะถึงเวลานอน ($quietStart น.) ดื่มน้ำให้ครบเป้าหมายนะ',
-        scheduledDate: tz.TZDateTime.from(alertAt, tz.local),
-        notificationDetails: details,
-        androidScheduleMode: mode,
-        matchDateTimeComponents: DateTimeComponents.time, // ซ้ำทุกวัน
-      );
-      _bedtimeAlertHHmm = alertHHmm;
-      await smartCupRef('bedtime_reminder')
-          .update({'time': alertHHmm, 'since': now.millisecondsSinceEpoch});
-    } else {
-      await smartCupRef('bedtime_reminder').remove();
-    }
-
     _armInAppTimer();
     debugPrint(
       '⏰ [Reminder] ดื่มน้ำ ${_drinkTimes.length} ครั้ง ทุก $interval นาที'
-      '${_bedtimeAlertHHmm != null ? ' / ก่อนนอน $_bedtimeAlertHHmm' : ''}'
       ' (${mode == AndroidScheduleMode.exactAllowWhileIdle ? 'ตรงเวลา' : 'อาจคลาดเคลื่อน'})',
     );
   }
@@ -353,13 +336,7 @@ class ReminderScheduler {
         break;
       }
     }
-    if (_bedtimeAlertHHmm != null) {
-      final bedAt = _nextOccurrence(_bedtimeAlertHHmm!, now);
-      if (nextAt == null || bedAt.isBefore(nextAt)) {
-        nextAt = bedAt;
-        nextKind = ReminderKind.bedtime;
-      }
-    }
+    // (แจ้งเตือน AI แสดง SnackBar ผ่าน onAiAlert แทน)
     if (nextAt == null || nextKind == null) return;
 
     final kind = nextKind;

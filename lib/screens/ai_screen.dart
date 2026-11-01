@@ -8,8 +8,6 @@ import 'package:http/http.dart' as http;
 import '../core/theme.dart';
 import '../core/ui_kit.dart';
 import '../core/utils.dart';
-import '../main.dart'
-    show showSystemNotification; // 🌟 ดึงฟังก์ชันยิงแจ้งเตือนระดับ OS มาใช้งาน
 
 class AITip {
   final IconData icon;
@@ -45,15 +43,9 @@ class _AIScreenState extends State<AIScreen> {
   // 🌟 ตัวแปรเก็บเวลานอน (เชื่อมตรงกับ settings/quiet_start)
   // เวลานอน = เวลาเริ่มปิดเสียง (ค่าเริ่มต้นตรงกับหน้าแจ้งเตือน)
   String _bedtimeStr = '22:00';
-  // 🌟 ตั้งค่าแจ้งเตือนจากหน้าแจ้งเตือน: แจ้งเตือน AI ต้องเคารพเหมือนแจ้งเตือนอื่น
-  bool _notificationEnabled = true;
-  String _quietEndStr = '06:00';
   double _expectedIntakeNow = 0;
   double _recommendedRatePerHour = 0;
   int _minutesUntilBed = 0;
-
-  String _lastAlertSignature = '';
-  DateTime? _lastAutoAlertTime;
 
   List<AITip> _tips = [];
   StreamSubscription<DatabaseEvent>? _subscription;
@@ -213,13 +205,6 @@ class _AIScreenState extends State<AIScreen> {
         try {
           final settingsMap = Map<dynamic, dynamic>.from(data as dynamic);
           final quietStart = settingsMap['quiet_start']?.toString();
-          final quietEnd = settingsMap['quiet_end']?.toString();
-
-          // สวิตช์ "เปิดการแจ้งเตือน" และเวลาสิ้นสุดช่วงปิดเสียง
-          _notificationEnabled = settingsMap['notification_enabled'] != false;
-          if (quietEnd != null && quietEnd.isNotEmpty) {
-            _quietEndStr = quietEnd;
-          }
 
           if (quietStart != null && quietStart.isNotEmpty && mounted) {
             setState(() {
@@ -303,64 +288,11 @@ class _AIScreenState extends State<AIScreen> {
     return liveList;
   }
 
-  // 🌟 ฟังก์ชันส่งแจ้งเตือน: แยก 2 โหมด (ไม่ถึง 50% เตือนด่วน / เกิน 50% ชวนดื่มเชิงบวก)
-  Future<void> _generateAndSendAIAlert({
-    required double remainingMl,
-    required double expectedByNow,
-    required double ratePerHr,
-    required int minsUntilBed,
-    required bool isOverHalf,
-  }) async {
-    final now = DateTime.now();
-    final String todayKey = _getCurrentDateKey();
-    final String timeStr =
-        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
-    final bool isEn = _selectedLanguage == 'en';
-
-    String alertTitle;
-    String alertBody;
-
-    if (isOverHalf) {
-      alertTitle = isEn
-          ? '💧 Great job! Keep it up!'
-          : '💧 ทำได้เกินครึ่งทางแล้ว!';
-      alertBody = isEn
-          ? 'You have achieved over 50% of your daily goal! Just $remainingMl ml left before $_bedtimeStr. Let\'s grab some water!'
-          : 'ยอดเยี่ยมมาก! คุณดื่มน้ำเกินครึ่งทางแล้ว เหลืออีกแค่ ${remainingMl.toInt()} ml ก็จะครบเป้าก่อนนอน $_bedtimeStr น. มาจิบน้ำเพิ่มความสดชื่นกันคับ!';
-    } else {
-      alertTitle = isEn
-          ? '🤖 AI Smart Hydration Alert!'
-          : '🤖 AI แจ้งเตือนเร่งดื่มน้ำอัจฉริยะ!';
-      alertBody = isEn
-          ? 'It is past 18:00 and you have drunk less than 50% (${_avgIntake.toInt()}/${_dailyTarget.toInt()} ml). Please drink ~${ratePerHr.toInt()} ml/hr before $_bedtimeStr!'
-          : 'ขณะนี้เวลา 18:00 น. แล้ว แต่คุณดื่มน้ำยังไม่ถึงครึ่งของเป้าหมาย (${_avgIntake.toInt()}/${_dailyTarget.toInt()} ml) แนะนำให้เร่งจิบน้ำชม.ละ ${ratePerHr.toInt()} ml ก่อนนอนเวลา $_bedtimeStr น. ครับ!';
-    }
-
-    await showSystemNotification(title: alertTitle, body: alertBody);
-
-    await smartCupRef('notification_logs').push().set({
-      'date': todayKey,
-      'time': timeStr,
-      'message': alertBody,
-      'timestamp': ServerValue.timestamp,
-    });
-  }
-
-  // ตอนนี้อยู่ในช่วงปิดเสียงไหม (เวลานอน → เวลาตื่น, รองรับข้ามเที่ยงคืน)
-  bool _isInQuietTime(DateTime now) {
-    final start = parseTOD(_bedtimeStr);
-    final end = parseTOD(_quietEndStr);
-    final int s = start.hour * 60 + start.minute;
-    final int e = end.hour * 60 + end.minute;
-    if (s == e) return false;
-    final int cur = now.hour * 60 + now.minute;
-    if (s < e) return cur >= s && cur < e;
-    return cur >= s || cur < e;
-  }
-
-  // 🌟 ตรวจสอบเงื่อนไข 50% และเวลา 18:00 น.
+  // 🌟 อัปเดตตัวเลขแผนการดื่ม 12 ชม. ในหน้านี้ทุก 30 วินาที
+  // (แจ้งเตือนจาก AI ย้ายไปทำงานเบื้องหลังใน core/ai_reminder.dart แล้ว:
+  //  12:00 / 18:00 / ก่อนนอน วันละครั้ง ทำงานแม้ปิดแอป จึงไม่ส่งแจ้งเตือนจากหน้านี้อีก)
   Future<void> _evaluateSmartPacingAndAutoAlert() async {
-    if (!isFirebaseReady() || !mounted) return;
+    if (!mounted) return;
 
     final metrics = _calculate12HrAndBedtimeMetrics(
       todayTotal: _avgIntake,
@@ -368,59 +300,11 @@ class _AIScreenState extends State<AIScreen> {
       bedtimeStr: _bedtimeStr,
     );
 
-    final double expectedByNow = metrics['expected_by_now'] as double;
-    final double remainingMl = metrics['remaining_ml'] as double;
-    final int minsUntilBed = metrics['mins_until_bed'] as int;
-    final double ratePerHr = metrics['rate_per_hr'] as double;
-
     setState(() {
-      _expectedIntakeNow = expectedByNow;
-      _minutesUntilBed = minsUntilBed;
-      _recommendedRatePerHour = ratePerHr;
+      _expectedIntakeNow = metrics['expected_by_now'] as double;
+      _minutesUntilBed = metrics['mins_until_bed'] as int;
+      _recommendedRatePerHour = metrics['rate_per_hr'] as double;
     });
-
-    if (remainingMl <= 0) return;
-
-    // 🌟 ปิดแจ้งเตือนไว้ หรืออยู่ในช่วงปิดเสียง → ไม่ส่งแจ้งเตือน AI
-    // (การ์ดวิเคราะห์ในหน้านี้ยังอัปเดตตามปกติ)
-    final now = DateTime.now();
-    if (!_notificationEnabled || _isInQuietTime(now)) return;
-
-    final int currentMinutes = now.hour * 60 + now.minute;
-    const int target18Hr = 18 * 60; // 18:00 น.
-
-    final double intakeRatio = _dailyTarget > 0
-        ? (_avgIntake / _dailyTarget)
-        : 0;
-    final bool isOverHalf = intakeRatio >= 0.50; // เกิน 50% หรือไม่
-
-    final bool isPast18 = currentMinutes >= target18Hr;
-
-    // ส่งแจ้งเตือนเมื่อเลย 18:00 น. (ข้อความปรับตามว่าดื่มเกิน 50% หรือยัง)
-    // แจ้งเตือน "ก่อนเวลานอน" ย้ายไปตั้งเวลาในมือถือแล้ว (core/reminder_scheduler.dart)
-    // จึงไม่ต้องเช็กซ้ำที่นี่ ไม่งั้นจะเด้งซ้ำ 2 ครั้ง
-    if (isPast18) {
-      final String todayKey = _getCurrentDateKey();
-      final String currentSignature =
-          '$todayKey-$_bedtimeStr-${isOverHalf ? 'over_half' : 'below_half'}';
-
-      final bool cooldownPassed =
-          _lastAutoAlertTime == null ||
-          now.difference(_lastAutoAlertTime!).inMinutes >= 30;
-
-      if (_lastAlertSignature != currentSignature || cooldownPassed) {
-        _lastAlertSignature = currentSignature;
-        _lastAutoAlertTime = now;
-
-        await _generateAndSendAIAlert(
-          remainingMl: remainingMl,
-          expectedByNow: expectedByNow,
-          ratePerHr: ratePerHr,
-          minsUntilBed: minsUntilBed,
-          isOverHalf: isOverHalf,
-        );
-      }
-    }
   }
 
   Map<String, dynamic> _getLatestDrinkDetails(Map<dynamic, dynamic> mapData) {
@@ -550,6 +434,84 @@ class _AIScreenState extends State<AIScreen> {
     };
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // 🌟 คำนวณคะแนนจากประวัติการดื่มจริง (สูตรตายตัว อธิบายได้ทุกตัวเลข)
+  //
+  // ใช้ "7 วันที่ผ่านมา" ไม่รวมวันนี้ (วันนี้ยังดื่มไม่จบ จะทำให้คะแนนตอนเช้าต่ำเกินจริง)
+  // ถ้าเพิ่งเริ่มใช้งาน ใช้เท่าจำนวนวันที่มีจริงตั้งแต่วันแรกที่มีประวัติ (สูงสุด 7 วัน)
+  // ถ้ายังไม่มีวันที่จบแล้วเลย ใช้ข้อมูลวันนี้แทน
+  //
+  // 1) % ของแต่ละวัน = ยอดดื่มวันนั้น ÷ เป้าหมาย × 100 (ไม่เกิน 100, วันที่ไม่มีข้อมูล = 0)
+  // 2) Health Score  = ค่าเฉลี่ย % ของวันเหล่านั้น
+  // 3) Consistency   = จำนวนวันที่ดื่มครบเป้า ÷ จำนวนวัน × 100
+  // ─────────────────────────────────────────────────────────────
+  Map<String, dynamic> _computeScores(
+    Map<dynamic, dynamic> historyMap,
+    double dailyTarget,
+  ) {
+    String keyOf(DateTime d) =>
+        "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}";
+    double totalOf(DateTime d) {
+      final day = historyMap[keyOf(d)];
+      if (day is Map) return double.tryParse('${day['daily_total']}') ?? 0;
+      return 0;
+    }
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final target = dailyTarget > 0 ? dailyTarget : 2400.0;
+
+    // วันแรกที่มีประวัติ (ไม่นับวันก่อนเริ่มใช้งานเป็น 0%)
+    DateTime? firstDay;
+    for (final k in historyMap.keys) {
+      final d = DateTime.tryParse(k.toString());
+      if (d == null) continue;
+      final day = DateTime(d.year, d.month, d.day);
+      if (firstDay == null || day.isBefore(firstDay)) firstDay = day;
+    }
+
+    int completedDays = 0;
+    if (firstDay != null && firstDay.isBefore(today)) {
+      completedDays = today.difference(firstDay).inDays.clamp(0, 7).toInt();
+    }
+
+    final List<Map<String, dynamic>> days = [];
+    if (completedDays == 0) {
+      // ยังไม่มีวันที่จบแล้ว → ใช้วันนี้
+      final total = totalOf(today);
+      days.add({
+        'date': keyOf(today),
+        'total': total,
+        'percent': (total / target * 100).clamp(0, 100).toDouble(),
+      });
+    } else {
+      for (int i = completedDays; i >= 1; i--) {
+        final d = today.subtract(Duration(days: i));
+        final total = totalOf(d);
+        days.add({
+          'date': keyOf(d),
+          'total': total,
+          'percent': (total / target * 100).clamp(0, 100).toDouble(),
+        });
+      }
+    }
+
+    final double avgPercent =
+        days.fold<double>(0, (sum, d) => sum + (d['percent'] as double)) /
+        days.length;
+    final int metDays = days
+        .where((d) => (d['percent'] as double) >= 100)
+        .length;
+
+    return {
+      'health_score': avgPercent.round(),
+      'consistency': (metDays / days.length * 100).round(),
+      'days_used': days.length,
+      'met_days': metDays,
+      'days': days,
+    };
+  }
+
   void _listenFirebase() {
     if (!isFirebaseReady()) {
       if (mounted) setState(() => _isLoading = false);
@@ -588,9 +550,10 @@ class _AIScreenState extends State<AIScreen> {
 
         String todayKey = _getCurrentDateKey();
         double todayTotal = 0.0;
+        Map<dynamic, dynamic> historyMap = {};
         if (mapData['history_logs'] != null) {
           try {
-            final historyMap = Map<dynamic, dynamic>.from(
+            historyMap = Map<dynamic, dynamic>.from(
               mapData['history_logs'] as dynamic,
             );
             if (historyMap[todayKey] != null) {
@@ -605,8 +568,10 @@ class _AIScreenState extends State<AIScreen> {
             ? ((todayTotal / dailyTarget) * 100).clamp(0, 100).toInt()
             : 0;
 
-        int healthScore = 0;
-        int consistency = 0;
+        // 🌟 คะแนนคำนวณจากประวัติจริงทุกครั้งที่ข้อมูลเปลี่ยน (ไม่ต้องรอกดวิเคราะห์)
+        final scores = _computeScores(historyMap, dailyTarget);
+        final int healthScore = scores['health_score'] as int;
+        final int consistency = scores['consistency'] as int;
         List<AITip> fetchedTips = [];
 
         if (mapData['ai_insights'] != null) {
@@ -618,9 +583,7 @@ class _AIScreenState extends State<AIScreen> {
           if (savedDate == null || savedDate != todayKey) {
             smartCupRef('ai_insights').remove();
           } else {
-            healthScore = int.tryParse('${aiData['health_score']}') ?? 0;
-            consistency = int.tryParse('${aiData['consistency']}') ?? 0;
-
+            // ai_insights ใช้เก็บเฉพาะคำแนะนำ (คะแนนคำนวณจากประวัติด้านบนแล้ว)
             if (aiData['tips'] != null && aiData['tips'] is List) {
               for (var item in aiData['tips']) {
                 if (item != null) {
@@ -673,14 +636,12 @@ class _AIScreenState extends State<AIScreen> {
     required double dailyTarget,
     required int percentInt,
     required String currentTime,
-    required int streakDays,
+    required int healthScore,
+    required int consistency,
     required String bedtimeStr,
     required double expectedByNow,
     required double ratePerHr,
   }) {
-    int healthScore = percentInt >= 100 ? 95 : (percentInt >= 50 ? 75 : 45);
-    int consistency = (streakDays * 20).clamp(20, 100);
-
     List<AITip> tips = [];
     bool isEn = _selectedLanguage == 'en';
     final remaining = (dailyTarget - todayTotal).clamp(0, dailyTarget).toInt();
@@ -746,9 +707,10 @@ class _AIScreenState extends State<AIScreen> {
 
       String todayKey = _getCurrentDateKey();
       double todayTotal = 0.0;
+      Map<dynamic, dynamic> historyMap = {};
       if (data['history_logs'] != null) {
         try {
-          final historyMap = Map<dynamic, dynamic>.from(
+          historyMap = Map<dynamic, dynamic>.from(
             data['history_logs'] as dynamic,
           );
           if (historyMap[todayKey] != null) {
@@ -763,7 +725,6 @@ class _AIScreenState extends State<AIScreen> {
       latestDrink['type']?.toString() ?? 'น้ำเปล่า';
       latestDrink['description']?.toString() ?? currentFormattedTime;
       double.tryParse('${latestDrink['amount']}') ?? 0.0;
-      final streakDays = int.tryParse('${data['streak_days'] ?? 0}') ?? 0;
 
       double dailyTarget = 2400.0;
       if (data['profile'] != null && data['profile'] is Map) {
@@ -771,6 +732,17 @@ class _AIScreenState extends State<AIScreen> {
         dailyTarget =
             double.tryParse('${profile['daily_target'] ?? 2400}') ?? 2400.0;
       }
+
+      // 🌟 คะแนนคำนวณจากประวัติ (สูตรเดียวกับที่แสดงบนหน้าจอ)
+      final scores = _computeScores(historyMap, dailyTarget);
+      final int healthScore = scores['health_score'] as int;
+      final int consistency = scores['consistency'] as int;
+      final String historyLines = (scores['days'] as List)
+          .map(
+            (d) =>
+                '  - ${d['date']}: ${(d['total'] as double).toInt()} ml (${(d['percent'] as double).round()}%)',
+          )
+          .join('\n');
 
       final metrics = _calculate12HrAndBedtimeMetrics(
         todayTotal: todayTotal,
@@ -791,12 +763,16 @@ class _AIScreenState extends State<AIScreen> {
 - วันที่: $todayKey เวลาปัจจุบัน: $currentFormattedTime น.
 - เวลานอนที่ผู้ใช้ตั้งไว้: $_bedtimeStr น.
 - ปริมาณที่ดื่มวันนี้: ${todayTotal.toInt()} ml จากเป้าหมาย ${dailyTarget.toInt()} ml (คิดเป็น $percentInt%)
+- ประวัติการดื่มย้อนหลัง (เทียบกับเป้าหมาย):
+$historyLines
+- Health Score (ค่าเฉลี่ย % ที่ทำได้ตามเป้า): $healthScore/100
+- Consistency (สัดส่วนวันที่ดื่มครบเป้า ${scores['met_days']} จาก ${scores['days_used']} วัน): $consistency/100
 - หากดื่มไม่ถึง 50% และเวลาผ่าน 18:00 น. แล้ว ให้วางแผนเร่งดื่มน้ำให้ทันเวลานอน $_bedtimeStr น.
 
+คะแนนด้านบนคำนวณไว้แล้ว ไม่ต้องให้คะแนนใหม่
+ให้วิเคราะห์รูปแบบการดื่มจากข้อมูลข้างต้น แล้วเขียนคำแนะนำเฉพาะบุคคล 2-3 ข้อ
 ตอบเป็น JSON โครงสร้างนี้เท่านั้น:
 {
-  "health_score": <คะแนนสุขภาพ 0-100>,
-  "consistency": <คะแนนความสม่ำเสมอ 0-100>,
   "tips": [
     {
       "icon_type": "<sunny หรือ fire หรือ coffee หรือ alert>",
@@ -883,8 +859,9 @@ class _AIScreenState extends State<AIScreen> {
 
         aiResult = {
           "date": todayKey,
-          "health_score": generated['health_score'] ?? 75,
-          "consistency": generated['consistency'] ?? 50,
+          // คะแนนมาจากสูตรในแอปเสมอ (Gemini เขียนเฉพาะคำแนะนำ)
+          "health_score": healthScore,
+          "consistency": consistency,
           "tips": finalTips,
         };
       } else {
@@ -893,7 +870,8 @@ class _AIScreenState extends State<AIScreen> {
           dailyTarget: dailyTarget,
           percentInt: percentInt,
           currentTime: currentFormattedTime,
-          streakDays: streakDays,
+          healthScore: healthScore,
+          consistency: consistency,
           bedtimeStr: _bedtimeStr,
           expectedByNow: expectedByNow,
           ratePerHr: ratePerHr,
